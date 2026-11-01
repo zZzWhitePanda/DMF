@@ -53,6 +53,7 @@ func newFarmServer(t *testing.T) *farmServer {
 
 	mux := http.NewServeMux()
 	NewFarmHandlers(d, s.manager).Register(mux)
+	NewWSHandlers(d, s.manager, nil).Register(mux)
 	mw := auth.NewMiddleware(auth.NewGoogleProvider(auth.Config{SessionCookie: testCookie}), d)
 	s.handler = mw.RequireAuth(mw.RequireLicensed(mux))
 	return s

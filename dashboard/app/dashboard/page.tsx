@@ -33,6 +33,7 @@ import {
 
 const MAX_EVENTS = 1000;
 const MAX_RETRY_MS = 15_000;
+const STOPPED_POLL_MS = 3_000;
 /** Longest formatted total that still fits a phone at the full hero size. */
 const HERO_FULL_SIZE_CHARS = 13;
 
@@ -94,21 +95,25 @@ export default function Dashboard() {
   const now = useNow();
 
   const nextId = useRef(0);
-  const wasRunning = useRef<boolean | null>(null);
+  const lastRun = useRef<number | null>(null);
   const latest = useRef({ session, events });
   latest.current = { session, events };
 
+  const loadSummary = useCallback(async () => {
+    const next = await farm.summary();
+    setSummary(next);
+    // The server's word beats the stored session: this tab may have missed
+    // the picker's one event, or kept one that's since been answered.
+    setSession((s) => ({ ...s, flowPicker: next.flow_picker }));
+  }, []);
+
   const refresh = useCallback(async () => {
     try {
-      const next = await farm.summary();
-      setSummary(next);
-      // The server's word beats the stored session: this tab may have missed
-      // the picker's one event, or kept one that's since been answered.
-      setSession((s) => ({ ...s, flowPicker: next.flow_picker }));
+      await loadSummary();
     } catch (e) {
       setError({ title: "Couldn't reach the server", message: (e as Error).message });
     }
-  }, []);
+  }, [loadSummary]);
 
   useEffect(() => {
     if (user) refresh();
@@ -133,19 +138,22 @@ export default function Dashboard() {
   }, []);
 
   const isRunning = !!summary?.is_running;
+  const runId = summary?.run_id ?? 0;
   const loaded = summary !== null;
 
-  // Stay connected while the farm runs, retrying with backoff if the socket
-  // drops. A close can also mean the farm stopped, so re-check on every drop.
+  // Stay connected for as long as this run lasts, retrying with backoff if the
+  // socket drops. The server ends every socket when the farm stops, so re-check
+  // on every close. Keyed on the run, not is_running: a restart can go from one
+  // run to the next without this tab ever seeing the farm stopped.
   useEffect(() => {
     if (!loaded) return;
-    const before = wasRunning.current;
-    wasRunning.current = isRunning;
-    if (!isRunning) {
+    const before = lastRun.current;
+    lastRun.current = runId;
+    if (!runId) {
       setConnection("idle");
       return;
     }
-    if (before === false) reset();
+    if (before !== null && before !== runId) reset();
 
     let cancelled = false;
     let attempts = 0;
@@ -162,9 +170,9 @@ export default function Dashboard() {
 
     const connect = () => {
       setConnection((c) => (c === "lost" ? c : "connecting"));
-      ws = connectFarmWS(onEvent, () => {
+      ws = connectFarmWS(onEvent, (farmStopped) => {
         if (cancelled) return;
-        setConnection("lost");
+        if (!farmStopped) setConnection("lost");
         refresh();
         retryTimer = setTimeout(connect, Math.min(1000 * 2 ** attempts++, MAX_RETRY_MS));
       });
@@ -180,7 +188,16 @@ export default function Dashboard() {
       clearTimeout(retryTimer);
       ws.close();
     };
-  }, [loaded, isRunning, refresh, reset]);
+  }, [loaded, runId, refresh, reset]);
+
+  // Nothing pushes to a page with no socket, so look out for a run started
+  // elsewhere, such as another tab's Start or Restart. Failures stay quiet:
+  // nobody asked for this, and the next poll tries again.
+  useEffect(() => {
+    if (!loaded || runId) return;
+    const t = setInterval(() => loadSummary().catch(() => {}), STOPPED_POLL_MS);
+    return () => clearInterval(t);
+  }, [loaded, runId, loadSummary]);
 
   async function run(action: Action, fn: () => Promise<unknown>) {
     setBusy(action);
