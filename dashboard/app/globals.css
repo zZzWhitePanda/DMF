@@ -2,31 +2,124 @@
 @tailwind components;
 @tailwind utilities;
 
+/* The palette's one rule: color means the farm is alive. Neutrals carry the
+   layout, accent appears only when something is earning, warn when it's
+   paused, danger when it needs you. A stopped farm is fully monochrome.
+   Text tokens all clear 4.5:1 on every surface. */
+:root {
+  --bg: 10 12 10;
+  --surface: 17 20 17;
+  --surface-raised: 24 28 24;
+  --surface-hover: 33 38 33;
+  --border: 44 50 44;
+  --border-strong: 69 77 69;
+
+  --fg: 238 241 233;
+  --fg-muted: 165 172 160;
+  --fg-subtle: 133 141 129;
+
+  --accent: 184 242 74;
+  --accent-hover: 206 248 122;
+  --accent-ink: 14 18 8;
+  --warn: 245 184 61;
+  --danger: 255 112 112;
+}
+
 @layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: rgb(var(--border));
+  }
   html {
-    @apply bg-background text-foreground;
     color-scheme: dark;
-    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    background: rgb(var(--bg));
+    -webkit-text-size-adjust: 100%;
   }
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply bg-bg font-sans text-sm text-fg antialiased;
     min-height: 100dvh;
+  }
+  ::selection {
+    background: rgb(var(--accent));
+    color: rgb(var(--accent-ink));
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent));
+    outline-offset: 2px;
+  }
+  button {
+    touch-action: manipulation;
   }
 }
 
 @layer utilities {
-  /* Thin scrollbar for scrollable panels (recent log, inventory). */
-  .scrollbar-thin::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+  /* Thin scrollbar for scrollable panels. */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--border-strong)) transparent;
   }
-  .scrollbar-thin::-webkit-scrollbar-track {
-    @apply bg-transparent;
+
+  /* Pulsing ring on the live status dot. */
+  .pulse-dot::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 9999px;
+    background: currentColor;
+    animation: pulse-ring 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
   }
-  .scrollbar-thin::-webkit-scrollbar-thumb {
-    @apply bg-border rounded-full;
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(1);
+      opacity: 0.55;
+    }
+    70%,
+    100% {
+      transform: scale(2.8);
+      opacity: 0;
+    }
   }
-  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-    @apply bg-muted;
+
+  /* Shimmer skeleton used while async data loads. */
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      rgb(var(--surface-raised)) 0%,
+      rgb(var(--surface-hover)) 50%,
+      rgb(var(--surface-raised)) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s infinite linear;
+  }
+  @keyframes shimmer {
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
+  }
+
+  /* New rows in the activity feed settle in rather than popping. */
+  .row-enter {
+    animation: row-enter 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  @keyframes row-enter {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
