@@ -133,6 +133,7 @@ export interface FlowPicker {
 export interface FarmSummary {
   name: string;
   is_running: boolean;
+  run_id: number; // new on every start, 0 while stopped
   configured: boolean; // Discord token/guild/channel are all filled in
   flow_picker: FlowPicker | null; // set while the grinder waits on a choice
 }
@@ -159,9 +160,11 @@ export const farm = {
     }),
 };
 
+const WS_NORMAL_CLOSURE = 1000; // the server ending the socket because the farm stopped
+
 export function connectFarmWS(
   onEvent: (ev: GrinderEvent) => void,
-  onClose?: () => void,
+  onClose?: (farmStopped: boolean) => void,
 ): WebSocket {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/farm/ws`);
@@ -172,6 +175,6 @@ export function connectFarmWS(
       // swallow bad frames
     }
   };
-  ws.onclose = () => onClose?.();
+  ws.onclose = (e) => onClose?.(e.code === WS_NORMAL_CLOSURE);
   return ws;
 }

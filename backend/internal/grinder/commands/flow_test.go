@@ -56,11 +56,13 @@ func TestPickerReplaysShareOnePrompt(t *testing.T) {
 		t.Fatal("replay blocked on the open picker")
 	}
 
-	ev := <-bus.Chan()
+	feed, unsubscribe := bus.Subscribe()
+	defer unsubscribe()
+	ev := <-feed
 	if ev.Kind != events.FlowPickerNeeded || ev.Message != "Your flows" || len(ev.Choices) != 2 {
 		t.Fatalf("unexpected event: %+v", ev)
 	}
-	if len(bus.Chan()) != 0 {
+	if len(feed) != 0 {
 		t.Fatal("picker was announced more than once")
 	}
 

@@ -97,8 +97,12 @@ func (h *WSHandlers) wsFarm(w http.ResponseWriter, r *http.Request) {
 }
 
 // pump upgrades to a websocket + streams events until the client
-// disconnects or the grinder stops (bus channel closes).
+// disconnects or the grinder stops (subscription closes).
 func (h *WSHandlers) pump(w http.ResponseWriter, r *http.Request, bus *events.Bus) {
+	// Subscribe before the handshake so an open socket can't miss an event.
+	feed, unsubscribe := bus.Subscribe()
+	defer unsubscribe()
+
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.WithError(err).Debug("ws upgrade failed")
@@ -133,8 +137,12 @@ func (h *WSHandlers) pump(w http.ResponseWriter, r *http.Request, bus *events.Bu
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
-		case ev, ok := <-bus.Chan():
+		case ev, ok := <-feed:
 			if !ok {
+				// A normal closure tells the page the farm stopped, as
+				// opposed to the connection dropping.
+				msg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "farm stopped")
+				_ = conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
 				return
 			}
 			payload, err := encodeEvent(ev)

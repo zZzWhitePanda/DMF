@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/cluster"
 	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/config"
@@ -17,13 +18,15 @@ import (
 // Manager tracks running grinder instances by their database account id.
 // Thread-safe — HTTP handlers can call Start/Stop concurrently.
 type Manager struct {
-	mu       sync.Mutex
-	entries  map[int64]*entry
+	mu      sync.Mutex
+	entries map[int64]*entry
+	lastRun int64
 }
 
 type entry struct {
 	bus    *events.Bus
 	cancel context.CancelFunc
+	runID  int64
 }
 
 // New returns an empty Manager.
@@ -34,7 +37,7 @@ func New() *Manager {
 // Start launches a grinder for the given account id with the given
 // parsed config. Returns an error if the grinder is already running or
 // the cluster fails to initialize. The bus is retained for WebSocket
-// subscribers until Stop is called.
+// subscribers until Stop is called, which ends their subscriptions.
 func (m *Manager) Start(accountID int64, cfg *config.Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -53,7 +56,10 @@ func (m *Manager) Start(accountID int64, cfg *config.Config) error {
 		}
 		go r.Run(ctx)
 	}
-	m.entries[accountID] = &entry{bus: bus, cancel: cancel}
+	// Based on the clock so ids stay unique across server restarts: a tab
+	// that outlives the server must still see the next run as a new one.
+	m.lastRun = max(m.lastRun+1, time.Now().UnixMilli())
+	m.entries[accountID] = &entry{bus: bus, cancel: cancel, runID: m.lastRun}
 	log.WithField("account_id", accountID).Info("grinder started")
 	return nil
 }
@@ -68,6 +74,7 @@ func (m *Manager) Stop(accountID int64) {
 		return
 	}
 	e.cancel()
+	e.bus.Close()
 	delete(m.entries, accountID)
 	log.WithField("account_id", accountID).Info("grinder stopped")
 }
@@ -78,6 +85,18 @@ func (m *Manager) IsRunning(accountID int64) bool {
 	defer m.mu.Unlock()
 	_, ok := m.entries[accountID]
 	return ok
+}
+
+// RunID identifies the current run of an account's grinder, so a client can
+// tell a restart from the same run carrying on. Returns 0 if not running.
+func (m *Manager) RunID(accountID int64) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[accountID]
+	if !ok {
+		return 0
+	}
+	return e.runID
 }
 
 // Bus returns the event bus for a running grinder so WebSocket clients
@@ -99,6 +118,7 @@ func (m *Manager) StopAll() {
 	defer m.mu.Unlock()
 	for id, e := range m.entries {
 		e.cancel()
+		e.bus.Close()
 		delete(m.entries, id)
 	}
 }

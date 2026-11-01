@@ -65,11 +65,16 @@ var (
 )
 
 // Bus is a non-blocking channel-based event sink with back-channels for
-// the flow picker and user pause/resume signals.
+// the flow picker and user pause/resume signals. Every subscriber gets its
+// own copy of each event.
 type Bus struct {
-	ch          chan Event
+	ch          chan Event // queues events while nobody is subscribed
 	flowAnswer  chan int
 	pauseSignal chan bool // TUI → instances; true = pause, false = resume
+
+	subMu  sync.Mutex // guards subs, closed and moves on and off ch
+	subs   map[chan Event]struct{}
+	closed bool
 
 	flowMu     sync.Mutex
 	flowPicker *FlowPicker // the picker being waited on, nil if none
@@ -84,6 +89,7 @@ func NewBus(buf int) *Bus {
 		ch:          make(chan Event, buf),
 		flowAnswer:  make(chan int, 1),
 		pauseSignal: make(chan bool, 8),
+		subs:        make(map[chan Event]struct{}),
 	}
 }
 
@@ -106,7 +112,9 @@ func (b *Bus) PauseSignals() <-chan bool {
 	return b.pauseSignal
 }
 
-// Send drops the event if the buffer is full. Safe on a nil bus (noop).
+// Send never blocks: a subscriber whose buffer is full misses the event, and
+// with no subscribers it queues for the next one, or is dropped if that queue
+// is full. Safe on a nil bus (noop).
 func (b *Bus) Send(e Event) {
 	if b == nil {
 		return
@@ -114,15 +122,83 @@ func (b *Bus) Send(e Event) {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	if b.closed {
+		return
+	}
+	if len(b.subs) == 0 {
+		offer(b.ch, e)
+		return
+	}
+	for sub := range b.subs {
+		offer(sub, e)
+	}
+}
+
+// Subscribe returns a channel of every event sent from now on, and a function
+// to call when done reading. The channel closes when the bus does, after any
+// queued events have been read. With nobody else subscribed, it also starts
+// with the events queued so far: the server keeps no totals, so the dashboard
+// needs what a run emitted before its first tab connected.
+func (b *Bus) Subscribe() (<-chan Event, func()) {
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	sub := make(chan Event, cap(b.ch))
+	if len(b.subs) == 0 {
+		move(sub, b.ch)
+	}
+	if b.closed {
+		close(sub)
+		return sub, func() {}
+	}
+	b.subs[sub] = struct{}{}
+	return sub, func() { b.unsubscribe(sub) }
+}
+
+func (b *Bus) unsubscribe(sub chan Event) {
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	if _, ok := b.subs[sub]; !ok {
+		return
+	}
+	delete(b.subs, sub)
+	// Nobody else has these, so keep them for whoever connects next. That's
+	// usually the same tab, reloading.
+	if len(b.subs) == 0 {
+		move(b.ch, sub)
+	}
+}
+
+// Close ends every subscription. Further sends are dropped. Safe to call twice.
+func (b *Bus) Close() {
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	b.closed = true
+	for sub := range b.subs {
+		close(sub)
+		delete(b.subs, sub)
+	}
+}
+
+// offer sends e unless ch is full.
+func offer(ch chan Event, e Event) {
 	select {
-	case b.ch <- e:
+	case ch <- e:
 	default:
 	}
 }
 
-// Chan exposes the receive-only side for consumers.
-func (b *Bus) Chan() <-chan Event {
-	return b.ch
+// move transfers everything queued on src to dst without blocking.
+func move(dst, src chan Event) {
+	for {
+		select {
+		case e := <-src:
+			offer(dst, e)
+		default:
+			return
+		}
+	}
 }
 
 // FlowPicker returns the picker the grinder is waiting on, or nil.
