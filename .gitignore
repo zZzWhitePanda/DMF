@@ -1,0 +1,23 @@
+# Node
+node_modules/
+.next/
+out/
+*.log
+
+# Go
+backend/memeforge
+backend/memeforge.exe
+backend/*.db
+backend/*.db-*
+backend/internal/static/dashboard-build/*
+!backend/internal/static/dashboard-build/index.html
+.DS_Store
+
+# Env
+.env
+.env.local
+*.local
+
+# IDE
+.vscode/
+.idea/

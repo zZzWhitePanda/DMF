@@ -1,0 +1,82 @@
+# Fly.io config for the Memeforge backend.
+#
+# App name is set from `flyctl launch` the first time you deploy. Change
+# the `app` field below if you want to rename.
+#
+# Primary region: SYD (Sydney) because the user is in Australia and
+# WebSocket latency to Discord's gateway is dominated by this hop. Pick
+# the closest region to YOUR users / Discord gateway if you redeploy.
+
+app = "memeforge"
+primary_region = "syd"
+
+# Builder: just use the Dockerfile. Fly supports buildpacks too but
+# we've already baked a multi-stage image.
+[build]
+  dockerfile = "Dockerfile"
+  # The Dockerfile reaches up a level to COPY backend/* and dashboard/*
+  # so the build context is the repo root.
+  build-target = "runtime"
+
+# Compute. On the hobby free tier you get 3 shared-cpu-1x machines free.
+# This single machine comfortably runs the server + one grinder; add
+# more machines or scale up when you have more accounts.
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
+
+# Persistent volume for the SQLite database. Created automatically on
+# first deploy via `fly volume create data --size 1 --region syd`.
+[mounts]
+  source = "data"
+  destination = "/data"
+
+# Runtime env. Secrets (OAuth client secret, master secret) are set
+# separately with `fly secrets set` and NOT committed here.
+[env]
+  PORT = "8080"
+  PUBLIC_URL = "https://memeforge.fly.dev"
+  DATABASE_PATH = "/data/memeforge.db"
+  ADMIN_EMAIL = "flynn.zipsin@gmail.com"
+
+# HTTP service — port 8080 inside the container, exposed on 443 (TLS
+# auto-provisioned by Fly's edge) and 80 (redirects to 443).
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  # WebSocket connections need a long timeout.
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 250
+    soft_limit = 200
+
+# Health check.
+[checks.http]
+  type = "http"
+  grace_period = "15s"
+  interval = "30s"
+  timeout = "5s"
+  method = "GET"
+  path = "/auth/me"
