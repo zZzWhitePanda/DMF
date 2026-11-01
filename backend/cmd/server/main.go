@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -177,29 +178,92 @@ func getenv(k, def string) string {
 	return def
 }
 
-// newDashboardHandler returns an http.Handler that serves the embedded
-// Next.js static export with SPA fallback — any route Next.js doesn't
-// recognize gets index.html back so the client router can resolve it.
+// newDashboardHandler serves the embedded Next.js static export with
+// SPA fallback. Does NOT use http.FileServer because its built-in
+// `/foo/index.html` → `/foo/` redirect conflicts with the SPA fallback
+// rewrite (which re-adds the index.html segment) and causes an infinite
+// 301 loop that makes every subroute unreachable. Instead we resolve
+// the file manually from the embed FS and serve its bytes.
 func newDashboardHandler(fsys fs.FS) http.Handler {
-	fileServer := http.FileServer(http.FS(fsys))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
+		p = strings.TrimSuffix(p, "/")
 		if p == "" {
 			p = "index.html"
 		}
-		if _, err := fs.Stat(fsys, p); err == nil {
-			fileServer.ServeHTTP(w, r)
+		// Resolution order:
+		//   1. Exact match (static assets: /favicon.ico, /_next/..., etc)
+		//   2. Route index (Next.js SSG: /settings/ → settings/index.html)
+		//   3. SPA fallback (unknown route → root index.html)
+		candidates := []string{
+			p,
+			filepath.ToSlash(filepath.Join(p, "index.html")),
+			"index.html",
+		}
+		for _, candidate := range candidates {
+			if candidate == "" {
+				continue
+			}
+			info, err := fs.Stat(fsys, candidate)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			serveEmbedded(w, r, fsys, candidate, info)
 			return
 		}
-		routeIndex := filepath.ToSlash(filepath.Join(p, "index.html"))
-		if _, err := fs.Stat(fsys, routeIndex); err == nil {
-			r.URL.Path = "/" + routeIndex
-			fileServer.ServeHTTP(w, r)
-			return
-		}
-		r.URL.Path = "/index.html"
-		fileServer.ServeHTTP(w, r)
+		http.NotFound(w, r)
 	})
+}
+
+// serveEmbedded opens path from fsys and writes it to w with the right
+// Content-Type + Last-Modified headers. Bypasses http.FileServer's URL
+// manipulation.
+func serveEmbedded(w http.ResponseWriter, r *http.Request, fsys fs.FS, path string, info fs.FileInfo) {
+	f, err := fsys.Open(path)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	readSeeker, ok := f.(io.ReadSeeker)
+	if !ok {
+		// embed.FS files implement ReadSeeker, so this fallback is
+		// defensive — if a non-seekable FS ever gets wired up, drop
+		// into a plain copy.
+		w.Header().Set("Content-Type", mimeTypeByExt(path))
+		_, _ = io.Copy(w, f)
+		return
+	}
+	// http.ServeContent sets Content-Type, Content-Length, handles
+	// Range + If-Modified-Since cleanly, and doesn't touch the URL.
+	http.ServeContent(w, r, path, info.ModTime(), readSeeker)
+}
+
+// mimeTypeByExt is a tiny Content-Type fallback for non-seekable FSes.
+func mimeTypeByExt(p string) string {
+	switch filepath.Ext(p) {
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".js", ".mjs":
+		return "application/javascript; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".svg":
+		return "image/svg+xml"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".ico":
+		return "image/x-icon"
+	case ".woff":
+		return "font/woff"
+	case ".woff2":
+		return "font/woff2"
+	}
+	return "application/octet-stream"
 }
 
 // sessionPurger runs forever, deleting expired sessions each hour.
