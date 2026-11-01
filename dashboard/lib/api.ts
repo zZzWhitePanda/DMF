@@ -125,10 +125,16 @@ export function connectGrinderWS(
 // on first call so the UI never needs an "add account" step.
 // ---------------------------------------------------------------------------
 
+export interface FlowPicker {
+  message: string; // what Dank Memer showed, for telling the choices apart
+  choices: string[];
+}
+
 export interface FarmSummary {
   name: string;
   is_running: boolean;
   configured: boolean; // Discord token/guild/channel are all filled in
+  flow_picker: FlowPicker | null; // set while the grinder waits on a choice
 }
 
 export const farm = {
@@ -145,6 +151,12 @@ export const farm = {
     }),
   start: () => request<{ status: string }>("/api/farm/start", { method: "POST" }),
   stop: () => request<{ status: string }>("/api/farm/stop", { method: "POST" }),
+  /** Answers the flow picker. -1 cancels. A 409 means nothing is waiting any more. */
+  answerFlow: (index: number) =>
+    request<{ ok: true }>("/api/farm/flow-choice", {
+      method: "POST",
+      body: JSON.stringify({ index }),
+    }),
 };
 
 export function connectFarmWS(

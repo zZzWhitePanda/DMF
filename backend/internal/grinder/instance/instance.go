@@ -57,6 +57,10 @@ type Instance struct {
 	pendingCmd Command
 	pMu        sync.Mutex
 
+	// Run's context. OnResponse gets it so a handler blocked on the user
+	// is released when the farm stops.
+	runCtx context.Context
+
 	// Last time we received any message from DM in our channel. The stuck
 	// detector uses this to decide when to resync.
 	activityMu   sync.Mutex
@@ -588,6 +592,7 @@ func (i *Instance) SetCommands(cmds []Command) {
 
 // Run blocks until ctx is done. Connects the gateway, prefetches commands, enters the main loop.
 func (i *Instance) Run(ctx context.Context) {
+	i.runCtx = ctx
 	i.Gateway.On("READY", func(data json.RawMessage) {
 		var r discord.Ready
 		if err := json.Unmarshal(data, &r); err == nil {
@@ -1070,7 +1075,7 @@ func (i *Instance) onMessage(data json.RawMessage) {
 	}
 
 	if cmd != nil && !paused {
-		if err := cmd.OnResponse(context.Background(), i, &m); err != nil {
+		if err := cmd.OnResponse(i.runCtx, i, &m); err != nil {
 			// Surface as a visible dashboard warning (previously logged
 			// at Debug and invisible). Silent click-failures were the
 			// root cause of multi-hour flow stalls — a stale custom_id

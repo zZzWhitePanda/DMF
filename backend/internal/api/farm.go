@@ -2,11 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/zZzWhitePanda/DMF/backend/internal/auth"
 	"github.com/zZzWhitePanda/DMF/backend/internal/db"
 	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/config"
+	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/events"
 	"github.com/zZzWhitePanda/DMF/backend/internal/runtime"
 )
 
@@ -17,11 +19,12 @@ import (
 // just add a /api/accounts/* UI on top of the same DB.
 //
 // Routes:
-//   GET    /api/farm            → farm summary ({name, is_running, has_config})
-//   GET    /api/farm/config     → yaml text
-//   PUT    /api/farm/config     → save yaml ({config_yaml})
-//   POST   /api/farm/start      → start grinder
-//   POST   /api/farm/stop       → stop grinder
+//   GET    /api/farm             → farm summary ({name, is_running, configured, flow_picker})
+//   GET    /api/farm/config      → yaml text
+//   PUT    /api/farm/config      → save yaml ({config_yaml})
+//   POST   /api/farm/start       → start grinder
+//   POST   /api/farm/stop        → stop grinder
+//   POST   /api/farm/flow-choice → answer the flow picker ({index}, -1 cancels)
 type FarmHandlers struct {
 	db      *db.DB
 	manager *runtime.Manager
@@ -36,6 +39,7 @@ func (h *FarmHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/farm/config", h.config)
 	mux.HandleFunc("/api/farm/start", h.start)
 	mux.HandleFunc("/api/farm/stop", h.stop)
+	mux.HandleFunc("/api/farm/flow-choice", h.flowChoice)
 }
 
 // getOrCreate returns the user's single farm account, creating a
@@ -75,10 +79,13 @@ func (h *FarmHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		cfg.Clusters[0].GuildID != "" &&
 		cfg.Clusters[0].ChannelID != "" &&
 		cfg.Clusters[0].Master.Token != ""
+	// flow_picker reaches tabs that weren't connected when the picker's
+	// one-shot event went out, so a closed tab can't strand the grinder.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"name":       acc.Name,
-		"is_running": h.manager.IsRunning(acc.ID),
-		"configured": configured,
+		"name":        acc.Name,
+		"is_running":  h.manager.IsRunning(acc.ID),
+		"configured":  configured,
+		"flow_picker": h.manager.Bus(acc.ID).FlowPicker(),
 	})
 }
 
@@ -160,6 +167,42 @@ func (h *FarmHandlers) stop(w http.ResponseWriter, r *http.Request) {
 	h.manager.Stop(acc.ID)
 	_ = h.db.SetAccountRunning(r.Context(), acc.ID, false)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+// flowChoice answers the flow picker the grinder is blocked on. 409 means
+// nothing is waiting: a second click, or a tab showing an old picker.
+func (h *FarmHandlers) flowChoice(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	acc, err := h.getOrCreate(r, user)
+	if err != nil || acc == nil {
+		writeError(w, http.StatusInternalServerError, "farm lookup failed")
+		return
+	}
+	// A pointer so a missing index can't pass as 0, the first flow.
+	var body struct {
+		Index *int `json:"index"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Index == nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	bus := h.manager.Bus(acc.ID)
+	if bus == nil {
+		writeError(w, http.StatusBadRequest, "farm not running")
+		return
+	}
+	switch err := bus.AnswerFlowChoice(*body.Index); {
+	case errors.Is(err, events.ErrNoFlowPicker):
+		writeError(w, http.StatusConflict, "no flow choice is waiting")
+	case err != nil:
+		writeError(w, http.StatusBadRequest, "index out of range")
+	default:
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
 }
 
 // /api/farm/ws lives in ws.go next to the other WebSocket endpoint —

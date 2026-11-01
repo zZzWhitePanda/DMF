@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"regexp"
@@ -16,8 +17,9 @@ import (
 )
 
 // Flow drives Dank Memer's /flow command: one slash invocation, user picks
-// which saved flow to use via TUI (first time), subsequent picker appearances
-// auto-click the previously-chosen flow to recover from accidental stops.
+// which saved flow to use via the dashboard (first time), subsequent picker
+// appearances auto-click the previously-chosen flow to recover from accidental
+// stops.
 //
 // Cooldown is effectively "never re-invoke" (24h) because /flow is a single
 // long-running session — same model as /fish catch. If the flow genuinely
@@ -86,8 +88,8 @@ func (f *Flow) Run(ctx context.Context, i *instance.Instance) (time.Duration, er
 //     the latest /flow and click continue."
 //
 // Checked every 5 seconds. Honors pause (user pause or humanized break)
-// so the stuck clock doesn't tick while the grinder is deliberately
-// idle.
+// and an open flow picker so the stuck clock doesn't tick while the
+// grinder is deliberately idle.
 func (f *Flow) runWatchdog(ctx context.Context, i *instance.Instance) {
 	const (
 		checkEvery        = 5 * time.Second
@@ -106,7 +108,7 @@ func (f *Flow) runWatchdog(ctx context.Context, i *instance.Instance) {
 			return
 		case <-ticker.C:
 		}
-		if i.State.IsPaused() {
+		if i.State.IsPaused() || i.Bus.FlowPicker() != nil {
 			f.mu.Lock()
 			f.lastUpdate = time.Now()
 			f.mu.Unlock()
@@ -340,17 +342,16 @@ func (f *Flow) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 			return i.ClickButtonOnMessage(m, viewBtns[0].CustomID)
 		}
 
-		// First time: ask the user via TUI picker.
+		// First time: ask the user via the dashboard. Replays of this message
+		// while they decide have nothing to add, so they just return.
 		labels := make([]string, 0, len(viewBtns))
 		for _, b := range viewBtns {
 			labels = append(labels, b.Label)
 		}
-		i.Bus.Send(events.Event{
-			Kind:    events.FlowPickerNeeded,
-			Message: extractContext(m),
-			Choices: labels,
-		})
-		idx, err := i.Bus.AwaitFlowChoice(ctx)
+		idx, err := i.Bus.AskFlowChoice(ctx, extractContext(m), labels)
+		if errors.Is(err, events.ErrFlowPickerOpen) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -570,6 +571,10 @@ func extractViewButtons(btns []*discord.MessageComponent) []*discord.MessageComp
 	return out
 }
 
+// discordMarkup matches custom emoji and emphasis markers, which the
+// dashboard would otherwise show literally.
+var discordMarkup = regexp.MustCompile(`<a?:\w+:\d+>|\*\*|__`)
+
 func extractContext(m *discord.Message) string {
 	var sb strings.Builder
 	for _, e := range m.Embeds {
@@ -583,7 +588,11 @@ func extractContext(m *discord.Message) string {
 			sb.WriteString(fld.Name + ": " + fld.Value + "\n")
 		}
 	}
-	return strings.TrimSpace(sb.String())
+	// Components V2 messages carry their text here instead of in embeds.
+	for _, s := range discord.CollectText(m.Components) {
+		sb.WriteString(s + "\n")
+	}
+	return strings.TrimSpace(discordMarkup.ReplaceAllString(sb.String(), ""))
 }
 
 // detectActivity maps DM phrasing to a short activity label.

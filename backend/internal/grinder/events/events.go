@@ -2,6 +2,8 @@ package events
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 )
 
@@ -47,12 +49,30 @@ type Event struct {
 	Outcome  string
 }
 
+// FlowPicker is a flow choice the grinder is blocked on.
+type FlowPicker struct {
+	Message string   `json:"message"`
+	Choices []string `json:"choices"`
+}
+
+var (
+	// ErrFlowPickerOpen means AskFlowChoice found a picker already waiting.
+	ErrFlowPickerOpen = errors.New("flow picker already open")
+	// ErrNoFlowPicker means an answer arrived with nothing waiting for it.
+	ErrNoFlowPicker = errors.New("no flow picker open")
+	// ErrBadFlowChoice means an answer isn't one of the open picker's choices.
+	ErrBadFlowChoice = errors.New("flow choice out of range")
+)
+
 // Bus is a non-blocking channel-based event sink with back-channels for
 // the flow picker and user pause/resume signals.
 type Bus struct {
 	ch          chan Event
 	flowAnswer  chan int
 	pauseSignal chan bool // TUI → instances; true = pause, false = resume
+
+	flowMu     sync.Mutex
+	flowPicker *FlowPicker // the picker being waited on, nil if none
 }
 
 // NewBus returns a Bus with the given buffer size (defaults to 256).
@@ -105,12 +125,33 @@ func (b *Bus) Chan() <-chan Event {
 	return b.ch
 }
 
-// AnswerFlowChoice is called by the TUI when the user picks a flow.
-// idx is the chosen index, or -1 to cancel.
-func (b *Bus) AnswerFlowChoice(idx int) {
+// FlowPicker returns the picker the grinder is waiting on, or nil.
+func (b *Bus) FlowPicker() *FlowPicker {
 	if b == nil {
-		return
+		return nil
 	}
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	return b.flowPicker
+}
+
+// AnswerFlowChoice is called by the web API when the user picks a flow.
+// idx is the chosen index, or -1 to cancel. With no picker open it returns
+// ErrNoFlowPicker and stores nothing: the channel is buffered, so a second
+// click or a stale tab would otherwise become the next picker's answer.
+func (b *Bus) AnswerFlowChoice(idx int) error {
+	if b == nil {
+		return ErrNoFlowPicker
+	}
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	if b.flowPicker == nil {
+		return ErrNoFlowPicker
+	}
+	if idx < -1 || idx >= len(b.flowPicker.Choices) {
+		return ErrBadFlowChoice
+	}
+	b.flowPicker = nil
 	// Drain any stale value first.
 	select {
 	case <-b.flowAnswer:
@@ -120,15 +161,32 @@ func (b *Bus) AnswerFlowChoice(idx int) {
 	case b.flowAnswer <- idx:
 	default:
 	}
+	return nil
 }
 
-// AwaitFlowChoice is called by the grinder to block until the user picks a flow.
-func (b *Bus) AwaitFlowChoice(ctx context.Context) (int, error) {
+// AskFlowChoice is called by the grinder to show the user a flow picker and
+// block until they answer. An answer only wakes one waiter, and the gateway
+// and resync paths can replay a picker message on several goroutines, so
+// while a picker is open further calls return ErrFlowPickerOpen.
+func (b *Bus) AskFlowChoice(ctx context.Context, message string, choices []string) (int, error) {
 	if b == nil {
 		return -1, context.Canceled
 	}
+	b.flowMu.Lock()
+	if b.flowPicker != nil {
+		b.flowMu.Unlock()
+		return -1, ErrFlowPickerOpen
+	}
+	b.flowPicker = &FlowPicker{Message: message, Choices: choices}
+	b.flowMu.Unlock()
+
+	b.Send(Event{Kind: FlowPickerNeeded, Message: message, Choices: choices})
+
 	select {
 	case <-ctx.Done():
+		b.flowMu.Lock()
+		b.flowPicker = nil
+		b.flowMu.Unlock()
 		return -1, ctx.Err()
 	case idx := <-b.flowAnswer:
 		return idx, nil

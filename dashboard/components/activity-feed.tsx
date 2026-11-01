@@ -100,8 +100,8 @@ function describe(ev: GrinderEvent): Line {
 
 const FeedRow = memo(function FeedRow({ ev, running }: { ev: FeedEvent; running: boolean }) {
   const { icon: Icon, tone, title, detail, value } = describe(ev);
-  // A stopped farm is monochrome, so its past rewards go quiet with it.
-  const iconTone = tone === "live" && !running ? "neutral" : tone;
+  // A stopped farm is monochrome, so its past events go quiet with it.
+  const iconTone = running ? tone : "neutral";
   return (
     <li className="row-enter flex items-start gap-3 px-4 py-1.5 transition-colors hover:bg-surface-raised sm:px-5">
       <time className="font-mono text-xs leading-5 tabular-nums text-fg-subtle">{fmtTime(ev.time)}</time>
@@ -142,7 +142,11 @@ export function ActivityFeed({ events, running }: { events: FeedEvent[]; running
                 label: (
                   <>
                     Issues
-                    {issues > 0 && <span className="font-mono text-xs tabular-nums text-warn">{issues}</span>}
+                    {issues > 0 && (
+                      <span className={cn("font-mono text-xs tabular-nums", TONE_TEXT[running ? "warn" : "neutral"])}>
+                        {issues}
+                      </span>
+                    )}
                   </>
                 ),
               },

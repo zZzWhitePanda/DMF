@@ -1,4 +1,4 @@
-import type { GrinderEvent } from "@/lib/api";
+import type { FlowPicker, GrinderEvent } from "@/lib/api";
 
 // Everything the Farm page knows about the current run. It's derived purely
 // from the event stream: the backend doesn't keep session totals, so these
@@ -25,7 +25,8 @@ export interface Session {
   offShift: boolean;
   captcha: boolean;
   gatewayDown: boolean;
-  awaitingFlowChoice: boolean;
+  /** The picker the grinder is blocked on. Only an answer or the server clears it. */
+  flowPicker: FlowPicker | null;
 }
 
 export function freshSession(): Session {
@@ -44,7 +45,7 @@ export function freshSession(): Session {
     offShift: false,
     captcha: false,
     gatewayDown: false,
-    awaitingFlowChoice: false,
+    flowPicker: null,
   };
 }
 
@@ -84,7 +85,6 @@ export function applyEvent(prev: Session, ev: GrinderEvent): Session {
       s.payouts += 1;
       earn(s, ev.time, "coins", ev.reward || 0);
       s.captcha = false;
-      s.awaitingFlowChoice = false;
       break;
     case "item":
       collect(s, ev.items);
@@ -123,7 +123,7 @@ export function applyEvent(prev: Session, ev: GrinderEvent): Session {
       s.gatewayDown = true;
       break;
     case "flow_picker":
-      s.awaitingFlowChoice = true;
+      s.flowPicker = { message: ev.message, choices: ev.choices ?? [] };
       break;
   }
   return s;

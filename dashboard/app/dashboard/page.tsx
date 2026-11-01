@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, Play, RotateCw, ShieldAlert, Square, TriangleAlert, Waypoints } from "lucide-react";
-import { FarmSummary, GrinderEvent, connectFarmWS, farm } from "@/lib/api";
+import { ApiError, FarmSummary, FlowPicker, GrinderEvent, connectFarmWS, farm } from "@/lib/api";
 import {
   FeedEvent,
   Metric,
@@ -53,7 +53,7 @@ function deriveStatus(summary: FarmSummary, session: Session, connection: Connec
     return { label: "Connection lost", tone: "warn", detail: "Retrying. The farm keeps running on the server." };
   }
   if (session.captcha) return { label: "Captcha", tone: "danger" };
-  if (session.awaitingFlowChoice) return { label: "Waiting on a choice", tone: "warn" };
+  if (session.flowPicker) return { label: "Waiting on a choice", tone: "warn" };
   if (session.gatewayDown) return { label: "Reconnecting", tone: "warn", detail: "Lost the Discord gateway" };
   if (session.breakUntil && session.breakUntil > now) {
     return { label: "On break", tone: "warn", detail: `Back in ${fmtCountdown(session.breakUntil - now)}` };
@@ -88,6 +88,7 @@ export default function Dashboard() {
   const [events, setEvents] = useState<FeedEvent[]>([]);
   const [connection, setConnection] = useState<Connection>("idle");
   const [busy, setBusy] = useState<Action | null>(null);
+  const [answering, setAnswering] = useState<number | null>(null);
   const [error, setError] = useState<FarmError | null>(null);
   const [picked, setPicked] = useState<Metric | null>(null);
   const now = useNow();
@@ -99,7 +100,11 @@ export default function Dashboard() {
 
   const refresh = useCallback(async () => {
     try {
-      setSummary(await farm.summary());
+      const next = await farm.summary();
+      setSummary(next);
+      // The server's word beats the stored session: this tab may have missed
+      // the picker's one event, or kept one that's since been answered.
+      setSession((s) => ({ ...s, flowPicker: next.flow_picker }));
     } catch (e) {
       setError({ title: "Couldn't reach the server", message: (e as Error).message });
     }
@@ -199,6 +204,25 @@ export default function Dashboard() {
       await farm.start();
     });
 
+  async function answerFlow(index: number) {
+    setAnswering(index);
+    setError(null);
+    try {
+      await farm.answerFlow(index);
+      setSession((s) => ({ ...s, flowPicker: null }));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // Already answered, by a second click or another tab.
+        setSession((s) => ({ ...s, flowPicker: null }));
+      } else {
+        setError({ title: "Couldn't send your choice", message: (e as Error).message });
+        await refresh();
+      }
+    } finally {
+      setAnswering(null);
+    }
+  }
+
   const status = summary ? deriveStatus(summary, session, connection, now) : null;
 
   useEffect(() => {
@@ -266,21 +290,8 @@ export default function Dashboard() {
                 Solve it in Discord, then restart the farm to pick up where it left off.
               </Banner>
             )}
-            {isRunning && session.awaitingFlowChoice && (
-              <Banner
-                tone="warn"
-                icon={<Waypoints />}
-                title="Flow is waiting for a choice"
-                className="border-b border-border"
-                action={
-                  <Button variant="secondary" size="sm" loading={busy === "restart"} disabled={!!busy} onClick={restart}>
-                    {busy !== "restart" && <RotateCw />}
-                    Restart farm
-                  </Button>
-                }
-              >
-                The flow picker can't be answered from here yet, so the farm has stopped earning.
-              </Banner>
+            {isRunning && session.flowPicker && (
+              <FlowPickerBanner picker={session.flowPicker} answering={answering} onAnswer={answerFlow} />
             )}
 
             <Earnings session={session} running={isRunning} now={now} picked={picked} onPick={setPicked} />
@@ -306,6 +317,52 @@ function StatusLine({ status, account }: { status: Status; account: string }) {
         <span className="hidden font-mono text-xs text-fg-subtle sm:inline">{account}</span>
       )}
     </div>
+  );
+}
+
+/** Dank Memer often labels every flow "View", so number any that repeat. */
+function choiceLabels(choices: string[]) {
+  return choices.map((c, i) => (choices.indexOf(c) === choices.lastIndexOf(c) ? c : `${c} ${i + 1}`));
+}
+
+function FlowPickerBanner({
+  picker,
+  answering,
+  onAnswer,
+}: {
+  picker: FlowPicker;
+  answering: number | null;
+  onAnswer: (index: number) => void;
+}) {
+  return (
+    <Banner
+      tone="warn"
+      icon={<Waypoints />}
+      title="Flow is waiting for a choice"
+      className="border-b border-border sm:flex-col sm:items-stretch sm:gap-3"
+      action={
+        <div className="flex flex-wrap gap-2 sm:pl-7">
+          {choiceLabels(picker.choices).map((label, i) => (
+            <Button
+              key={i}
+              variant="secondary"
+              size="sm"
+              title={label}
+              className="max-w-full"
+              loading={answering === i}
+              disabled={answering !== null}
+              onClick={() => onAnswer(i)}
+            >
+              <span className="truncate">{label}</span>
+            </Button>
+          ))}
+        </div>
+      }
+    >
+      <span className="scrollbar-thin block max-h-32 overflow-y-auto whitespace-pre-line">
+        {picker.message || "Pick a flow to start earning."}
+      </span>
+    </Banner>
   );
 }
 
