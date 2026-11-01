@@ -68,47 +68,6 @@ func TestEverySubscriberGetsEveryEvent(t *testing.T) {
 	expect(t, second, 1, 2, 3)
 }
 
-func TestFirstSubscriberTakesWhatQueued(t *testing.T) {
-	b := NewBus(8)
-	b.Send(reward(1))
-	b.Send(reward(2))
-
-	first, cancelFirst := b.Subscribe()
-	defer cancelFirst()
-	second, cancelSecond := b.Subscribe()
-	defer cancelSecond()
-	expect(t, first, 1, 2)
-	expectIdle(t, second)
-
-	b.Send(reward(3))
-	expect(t, first, 3)
-	expect(t, second, 3)
-}
-
-func TestQueueSurvivesFillingUp(t *testing.T) {
-	b := NewBus(2)
-	for n := 1; n <= 10; n++ {
-		b.Send(reward(n))
-	}
-	feed, cancel := b.Subscribe()
-	defer cancel()
-	expect(t, feed, 1, 2)
-	expectIdle(t, feed)
-}
-
-func TestEventsQueueAgainOnceNobodyIsSubscribed(t *testing.T) {
-	b := NewBus(8)
-	gone, cancel := b.Subscribe()
-	expectIdle(t, gone)
-	b.Send(reward(1)) // sent to the subscriber, which never read it
-	cancel()
-	b.Send(reward(2))
-
-	feed, cancelNext := b.Subscribe()
-	defer cancelNext()
-	expect(t, feed, 1, 2)
-}
-
 func TestLeavingSubscriberTakesItsEventsWithItIfOthersRemain(t *testing.T) {
 	b := NewBus(8)
 	stays, cancelStays := b.Subscribe()
@@ -120,7 +79,7 @@ func TestLeavingSubscriberTakesItsEventsWithItIfOthersRemain(t *testing.T) {
 	cancelLeaves() // safe twice
 	expect(t, stays, 1)
 
-	// Nothing went back on the queue, so a new subscriber starts clean.
+	// A new subscriber gets that as state, not as a replayed event.
 	late, cancelLate := b.Subscribe()
 	defer cancelLate()
 	expectIdle(t, late)
@@ -229,10 +188,10 @@ func received(t *testing.T, answer <-chan int) int {
 
 func TestAskAnnouncesThePickerOnce(t *testing.T) {
 	b := NewBus(8)
-	answer := ask(t, b, context.Background())
-
 	feed, unsubscribe := b.Subscribe()
 	defer unsubscribe()
+	answer := ask(t, b, context.Background())
+
 	ev := <-feed
 	if ev.Kind != FlowPickerNeeded || ev.Message != "pick one" || len(ev.Choices) != 2 {
 		t.Fatalf("unexpected event: %+v", ev)
@@ -251,9 +210,9 @@ func TestAskAnnouncesThePickerOnce(t *testing.T) {
 
 func TestReplayedPickerDoesNotAddAWaiter(t *testing.T) {
 	b := NewBus(8)
-	answer := ask(t, b, context.Background())
 	feed, unsubscribe := b.Subscribe()
 	defer unsubscribe()
+	answer := ask(t, b, context.Background())
 	<-feed
 
 	idx, err := b.AskFlowChoice(context.Background(), "pick one", choices)
@@ -339,5 +298,140 @@ func TestNilBus(t *testing.T) {
 	}
 	if _, err := b.AskFlowChoice(context.Background(), "", nil); err == nil {
 		t.Fatal("nil bus accepted a picker")
+	}
+}
+
+func TestSessionAddsUpWithNobodyWatching(t *testing.T) {
+	b := NewBus(8)
+	b.SetRun("classic", CurrencyCoins)
+	b.Send(reward(100))
+	b.Send(reward(50))
+	b.Send(Event{Kind: Item, Items: map[string]int{"Ant": 2, "Boar": 1}})
+	b.Send(Event{Kind: Item, Items: map[string]int{"Ant": 3}})
+	b.Send(Event{Kind: Activity, Activity: "hunt"})
+
+	got := b.Session()
+	if got.Earned != 150 || got.Payouts != 2 {
+		t.Fatalf("earned %d from %d payouts, want 150 from 2", got.Earned, got.Payouts)
+	}
+	if got.ItemCount != 6 || got.Items["Ant"] != 5 || got.Items["Boar"] != 1 {
+		t.Fatalf("items = %d %v", got.ItemCount, got.Items)
+	}
+	if got.Activity != "hunt" {
+		t.Fatalf("activity = %q", got.Activity)
+	}
+	if got.StartedAt == 0 || got.EndedAt != 0 {
+		t.Fatalf("started %d, ended %d", got.StartedAt, got.EndedAt)
+	}
+}
+
+func TestLateSubscriberGetsTheRunSoFarAndOnlyNewEvents(t *testing.T) {
+	b := NewBus(8)
+	b.Send(reward(100))
+
+	feed, state, cancel := b.SubscribeSession()
+	defer cancel()
+	if state.Earned != 100 || len(state.Recent) != 1 {
+		t.Fatalf("started with earned %d and %d rows", state.Earned, len(state.Recent))
+	}
+	expectIdle(t, feed)
+
+	b.Send(reward(5))
+	ev := <-feed
+	if ev.Session == nil || ev.Session.Earned != 105 {
+		t.Fatalf("event carried %+v, want earned 105", ev.Session)
+	}
+	if ev.Session.Recent != nil {
+		t.Fatal("per-event state should not repeat the feed")
+	}
+}
+
+func TestPerEventStateIsACopy(t *testing.T) {
+	b := NewBus(8)
+	feed, cancel := b.Subscribe()
+	defer cancel()
+	b.Send(Event{Kind: Item, Items: map[string]int{"Ant": 1}})
+	first := <-feed
+	b.Send(Event{Kind: Item, Items: map[string]int{"Ant": 1}})
+	if got := first.Session.Items["Ant"]; got != 1 {
+		t.Fatalf("earlier state changed to %d", got)
+	}
+}
+
+func TestRunOnlyCountsItsOwnCurrency(t *testing.T) {
+	tokens := Event{Kind: FishToken, Reward: 7}
+	coins := reward(1000)
+
+	selling := NewBus(8)
+	selling.SetRun("fish", CurrencyTokens)
+	selling.Send(tokens)
+	selling.Send(coins)
+	got := selling.Session()
+	if got.Earned != 7 || got.Payouts != 1 || len(got.Recent) != 1 {
+		t.Fatalf("token run: earned %d, payouts %d, rows %d", got.Earned, got.Payouts, len(got.Recent))
+	}
+
+	forCoins := NewBus(8)
+	forCoins.SetRun("fish", CurrencyCoins)
+	forCoins.Send(tokens)
+	forCoins.Send(coins)
+	if got := forCoins.Session(); got.Earned != 1000 || got.Payouts != 1 {
+		t.Fatalf("coin run: earned %d, payouts %d", got.Earned, got.Payouts)
+	}
+}
+
+func TestBreakClearsWhenItEnds(t *testing.T) {
+	b := NewBus(8)
+	start := time.Now()
+	b.Send(Event{Kind: BreakStart, Reward: 300, Time: start})
+	if got := b.Session().BreakUntil; got != start.Unix()+300 {
+		t.Fatalf("break_until = %d, want %d", got, start.Unix()+300)
+	}
+	b.Send(Event{Kind: BreakEnd})
+	if got := b.Session().BreakUntil; got != 0 {
+		t.Fatalf("break_until = %d after the break ended", got)
+	}
+}
+
+func TestFeedKeepsTheNewestRowsAndSkipsNoise(t *testing.T) {
+	b := NewBus(8)
+	for n := 1; n <= recentEvents+5; n++ {
+		b.Send(reward(n))
+		b.Send(Event{Kind: Activity, Activity: "fish"})
+		b.Send(Event{Kind: CmdStart, Command: "fish"})
+	}
+	recent := b.Session().Recent
+	if len(recent) != recentEvents {
+		t.Fatalf("kept %d rows, want %d", len(recent), recentEvents)
+	}
+	if recent[0].Reward != 6 || recent[len(recent)-1].Reward != recentEvents+5 {
+		t.Fatalf("kept rewards %d to %d", recent[0].Reward, recent[len(recent)-1].Reward)
+	}
+}
+
+func TestSessionOutlivesClose(t *testing.T) {
+	b := NewBus(8)
+	b.Send(reward(100))
+	b.Close()
+	b.Close()
+	b.Send(reward(1))
+	got := b.Session()
+	if got.Earned != 100 || got.EndedAt == 0 {
+		t.Fatalf("earned %d, ended %d", got.Earned, got.EndedAt)
+	}
+}
+
+func TestSessionShowsAnOpenPicker(t *testing.T) {
+	b := NewBus(8)
+	answer := ask(t, b, context.Background())
+	if b.Session().FlowPicker == nil {
+		t.Fatal("open picker missing from session")
+	}
+	if err := b.AnswerFlowChoice(0); err != nil {
+		t.Fatal(err)
+	}
+	received(t, answer)
+	if b.Session().FlowPicker != nil {
+		t.Fatal("answered picker still in session")
 	}
 }

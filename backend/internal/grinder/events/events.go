@@ -47,6 +47,51 @@ type Event struct {
 	Items    map[string]int
 	Choices  []string
 	Outcome  string
+
+	// ID orders a run's events. Session is the run's state right after this
+	// event. Send fills in both.
+	ID      int64
+	Session *Session
+}
+
+// Currencies a run can earn. It only ever earns one.
+const (
+	CurrencyCoins  = "coins"
+	CurrencyTokens = "tokens"
+)
+
+// recentEvents is how much of a run's feed the bus keeps for tabs that open
+// later.
+const recentEvents = 200
+
+// Session is what a run has done so far. The server keeps it so that closing
+// every tab loses nothing, and all tabs show the same numbers.
+type Session struct {
+	Mode       string `json:"mode"`     // classic, flow or fish
+	Currency   string `json:"currency"` // the one currency this run earns
+	StartedAt  int64  `json:"started_at"`
+	EndedAt    int64  `json:"ended_at"`    // 0 while running
+	ServerTime int64  `json:"server_time"` // when this was taken, so clients can correct their clock
+
+	Earned    int            `json:"earned"`
+	Payouts   int            `json:"payouts"`
+	Fish      int            `json:"fish"`
+	ItemCount int            `json:"item_count"`
+	Items     map[string]int `json:"items"`
+
+	Activity      string      `json:"activity"`
+	Account       string      `json:"account"`
+	BreakUntil    int64       `json:"break_until"` // 0 unless on a break
+	OffShift      bool        `json:"off_shift"`
+	Captcha       bool        `json:"captcha"`
+	GatewayDown   bool        `json:"gateway_down"`
+	DiscordUp     bool        `json:"discord_up"`
+	TokenRejected bool        `json:"token_rejected"`
+	FlowPicker    *FlowPicker `json:"flow_picker"`
+
+	// Recent is the feed so far, oldest first. Only set by Bus.Session and
+	// SubscribeSession, so per-event copies stay small.
+	Recent []Event `json:"-"`
 }
 
 // OutcomeAuthFailed marks a GatewayDown event as Discord refusing the token.
@@ -69,16 +114,19 @@ var (
 
 // Bus is a non-blocking channel-based event sink with back-channels for
 // the flow picker and user pause/resume signals. Every subscriber gets its
-// own copy of each event.
+// own copy of each event. It also keeps the run's Session, and that survives
+// Close so the last run stays readable.
 type Bus struct {
-	ch          chan Event // queues events while nobody is subscribed
+	buf         int
 	flowAnswer  chan int
 	pauseSignal chan bool // TUI → instances; true = pause, false = resume
 
-	subMu         sync.Mutex // guards subs, closed, tokenRejected and moves on and off ch
-	subs          map[chan Event]struct{}
-	closed        bool
-	tokenRejected bool // Discord refused this run's token
+	subMu   sync.Mutex // guards everything down to recent
+	subs    map[chan Event]struct{}
+	closed  bool
+	lastID  int64
+	session Session
+	recent  []Event
 
 	flowMu     sync.Mutex
 	flowPicker *FlowPicker // the picker being waited on, nil if none
@@ -90,11 +138,20 @@ func NewBus(buf int) *Bus {
 		buf = 256
 	}
 	return &Bus{
-		ch:          make(chan Event, buf),
+		buf:         buf,
 		flowAnswer:  make(chan int, 1),
 		pauseSignal: make(chan bool, 8),
 		subs:        make(map[chan Event]struct{}),
+		session:     Session{StartedAt: time.Now().Unix(), Items: map[string]int{}},
 	}
+}
+
+// SetRun records what kind of run this is. Call before the grinder starts.
+func (b *Bus) SetRun(mode, currency string) {
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	b.session.Mode = mode
+	b.session.Currency = currency
 }
 
 // RequestPause asks all subscribed instances to pause (true) or resume (false).
@@ -116,9 +173,10 @@ func (b *Bus) PauseSignals() <-chan bool {
 	return b.pauseSignal
 }
 
-// Send never blocks: a subscriber whose buffer is full misses the event, and
-// with no subscribers it queues for the next one, or is dropped if that queue
-// is full. Safe on a nil bus (noop).
+// Send never blocks: a subscriber whose buffer is full misses the event, but
+// the next event's Session carries the state it missed. Rewards in the other
+// currency are dropped: a fishing run sells for one or the other, so anything
+// else is a false match. Safe on a nil bus (noop).
 func (b *Bus) Send(e Event) {
 	if b == nil {
 		return
@@ -128,70 +186,161 @@ func (b *Bus) Send(e Event) {
 	}
 	b.subMu.Lock()
 	defer b.subMu.Unlock()
-	if b.closed {
+	if b.closed || b.isOtherCurrency(e) {
 		return
 	}
-	if e.Kind == GatewayDown && e.Outcome == OutcomeAuthFailed {
-		b.tokenRejected = true
+	b.lastID++
+	e.ID = b.lastID
+	b.apply(e)
+	if e.Kind != Activity && e.Kind != CmdStart {
+		b.recent = append(b.recent, e)
+		if len(b.recent) > recentEvents {
+			b.recent = b.recent[1:]
+		}
 	}
 	if len(b.subs) == 0 {
-		offer(b.ch, e)
 		return
 	}
+	state := b.snapshot()
+	e.Session = &state
 	for sub := range b.subs {
 		offer(sub, e)
 	}
 }
 
-// TokenRejected reports whether Discord refused this run's token. The event
-// goes out once, so tabs opened later need this to learn about it.
+func (b *Bus) isOtherCurrency(e Event) bool {
+	switch b.session.Currency {
+	case CurrencyCoins:
+		return e.Kind == FishToken
+	case CurrencyTokens:
+		return e.Kind == CmdSuccess
+	}
+	return false
+}
+
+// apply folds an event into the session. Callers hold subMu.
+func (b *Bus) apply(e Event) {
+	s := &b.session
+	switch e.Kind {
+	case CmdSuccess, FishToken:
+		s.Earned += e.Reward
+		s.Payouts++
+		s.Captcha = false
+	case Item:
+		b.collect(e.Items)
+	case FishCaught:
+		s.Fish += b.collect(e.Items)
+	case Activity:
+		s.Activity = e.Activity
+	case Captcha:
+		s.Captcha = true
+	case BreakStart:
+		s.BreakUntil = e.Time.Unix() + int64(e.Reward)
+	case BreakEnd:
+		s.BreakUntil = 0
+	case ShiftOff:
+		s.OffShift = true
+	case ShiftOn:
+		s.OffShift = false
+	case GatewayUp:
+		s.GatewayDown = false
+		s.DiscordUp = true
+		s.TokenRejected = false
+		if e.Message != "" {
+			s.Account = e.Message
+		}
+	case GatewayDown:
+		s.GatewayDown = true
+		s.TokenRejected = e.Outcome == OutcomeAuthFailed
+	}
+}
+
+func (b *Bus) collect(items map[string]int) int {
+	total := 0
+	for name, qty := range items {
+		b.session.Items[name] += qty
+		total += qty
+	}
+	b.session.ItemCount += total
+	return total
+}
+
+// snapshot copies the session without the feed. Callers hold subMu.
+func (b *Bus) snapshot() Session {
+	s := b.session
+	s.ServerTime = time.Now().Unix()
+	s.Items = make(map[string]int, len(b.session.Items))
+	for name, qty := range b.session.Items {
+		s.Items[name] = qty
+	}
+	b.flowMu.Lock()
+	s.FlowPicker = b.flowPicker
+	b.flowMu.Unlock()
+	return s
+}
+
+func (b *Bus) snapshotWithFeed() Session {
+	s := b.snapshot()
+	s.Recent = append([]Event(nil), b.recent...)
+	return s
+}
+
+// Session returns the run's state so far, feed included. Nil-safe.
+func (b *Bus) Session() Session {
+	if b == nil {
+		return Session{}
+	}
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	return b.snapshotWithFeed()
+}
+
+// TokenRejected reports whether Discord refused this run's token.
 func (b *Bus) TokenRejected() bool {
 	if b == nil {
 		return false
 	}
 	b.subMu.Lock()
 	defer b.subMu.Unlock()
-	return b.tokenRejected
+	return b.session.TokenRejected
 }
 
 // Subscribe returns a channel of every event sent from now on, and a function
 // to call when done reading. The channel closes when the bus does, after any
-// queued events have been read. With nobody else subscribed, it also starts
-// with the events queued so far: the server keeps no totals, so the dashboard
-// needs what a run emitted before its first tab connected.
+// queued events have been read.
 func (b *Bus) Subscribe() (<-chan Event, func()) {
+	feed, _, cancel := b.SubscribeSession()
+	return feed, cancel
+}
+
+// SubscribeSession is Subscribe plus the state at that exact moment, so a
+// client starts complete and no event is missed or counted twice.
+func (b *Bus) SubscribeSession() (<-chan Event, Session, func()) {
 	b.subMu.Lock()
 	defer b.subMu.Unlock()
-	sub := make(chan Event, cap(b.ch))
-	if len(b.subs) == 0 {
-		move(sub, b.ch)
-	}
+	sub := make(chan Event, b.buf)
+	state := b.snapshotWithFeed()
 	if b.closed {
 		close(sub)
-		return sub, func() {}
+		return sub, state, func() {}
 	}
 	b.subs[sub] = struct{}{}
-	return sub, func() { b.unsubscribe(sub) }
+	return sub, state, func() { b.unsubscribe(sub) }
 }
 
 func (b *Bus) unsubscribe(sub chan Event) {
 	b.subMu.Lock()
 	defer b.subMu.Unlock()
-	if _, ok := b.subs[sub]; !ok {
-		return
-	}
 	delete(b.subs, sub)
-	// Nobody else has these, so keep them for whoever connects next. That's
-	// usually the same tab, reloading.
-	if len(b.subs) == 0 {
-		move(b.ch, sub)
-	}
 }
 
 // Close ends every subscription. Further sends are dropped. Safe to call twice.
 func (b *Bus) Close() {
 	b.subMu.Lock()
 	defer b.subMu.Unlock()
+	if !b.closed {
+		b.session.EndedAt = time.Now().Unix()
+	}
 	b.closed = true
 	for sub := range b.subs {
 		close(sub)
@@ -204,18 +353,6 @@ func offer(ch chan Event, e Event) {
 	select {
 	case ch <- e:
 	default:
-	}
-}
-
-// move transfers everything queued on src to dst without blocking.
-func move(dst, src chan Event) {
-	for {
-		select {
-		case e := <-src:
-			offer(dst, e)
-		default:
-			return
-		}
 	}
 }
 

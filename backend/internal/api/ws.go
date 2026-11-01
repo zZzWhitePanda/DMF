@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 	"github.com/zZzWhitePanda/DMF/backend/internal/auth"
 	"github.com/zZzWhitePanda/DMF/backend/internal/db"
 	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/events"
 	"github.com/zZzWhitePanda/DMF/backend/internal/runtime"
-	log "github.com/sirupsen/logrus"
 )
 
 // WSHandlers streams live grinder events to the browser dashboard.
@@ -100,7 +100,7 @@ func (h *WSHandlers) wsFarm(w http.ResponseWriter, r *http.Request) {
 // disconnects or the grinder stops (subscription closes).
 func (h *WSHandlers) pump(w http.ResponseWriter, r *http.Request, bus *events.Bus) {
 	// Subscribe before the handshake so an open socket can't miss an event.
-	feed, unsubscribe := bus.Subscribe()
+	feed, state, unsubscribe := bus.SubscribeSession()
 	defer unsubscribe()
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
@@ -124,6 +124,17 @@ func (h *WSHandlers) pump(w http.ResponseWriter, r *http.Request, bus *events.Bu
 			}
 		}
 	}()
+
+	// Every socket opens with the whole session, so a tab doesn't have to be
+	// open while something happens to be able to show it.
+	first, err := json.Marshal(map[string]interface{}{"kind": "session", "session": sessionPayload(&state)})
+	if err != nil {
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if err := conn.WriteMessage(websocket.TextMessage, first); err != nil {
+		return
+	}
 
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
@@ -158,7 +169,12 @@ func (h *WSHandlers) pump(w http.ResponseWriter, r *http.Request, bus *events.Bu
 }
 
 func encodeEvent(ev events.Event) ([]byte, error) {
-	return json.Marshal(map[string]interface{}{
+	return json.Marshal(eventFields(ev))
+}
+
+func eventFields(ev events.Event) map[string]interface{} {
+	return map[string]interface{}{
+		"id":       ev.ID,
 		"kind":     kindToString(ev.Kind),
 		"command":  ev.Command,
 		"message":  ev.Message,
@@ -168,7 +184,24 @@ func encodeEvent(ev events.Event) ([]byte, error) {
 		"items":    ev.Items,
 		"choices":  ev.Choices,
 		"outcome":  ev.Outcome,
-	})
+		"session":  ev.Session,
+	}
+}
+
+// sessionPayload adds the feed to a session. Nil stays nil: the account hasn't
+// run since the server started.
+func sessionPayload(s *events.Session) interface{} {
+	if s == nil {
+		return nil
+	}
+	recent := make([]map[string]interface{}, 0, len(s.Recent))
+	for _, ev := range s.Recent {
+		recent = append(recent, eventFields(ev))
+	}
+	return struct {
+		*events.Session
+		Recent []map[string]interface{} `json:"recent"`
+	}{s, recent}
 }
 
 func kindToString(k events.Kind) string {

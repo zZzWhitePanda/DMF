@@ -6,13 +6,14 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/cluster"
 	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/config"
 	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/events"
-	log "github.com/sirupsen/logrus"
 )
 
 // Manager tracks running grinder instances by their database account id.
@@ -21,6 +22,8 @@ type Manager struct {
 	mu      sync.Mutex
 	entries map[int64]*entry
 	lastRun int64
+	// finished keeps each account's last bus, so its session outlives Stop.
+	finished map[int64]*events.Bus
 }
 
 type entry struct {
@@ -31,7 +34,23 @@ type entry struct {
 
 // New returns an empty Manager.
 func New() *Manager {
-	return &Manager{entries: make(map[int64]*entry)}
+	return &Manager{entries: make(map[int64]*entry), finished: make(map[int64]*events.Bus)}
+}
+
+// RunKind works out a run's mode and its one currency, with the same
+// precedence as commands.Build: flow, then fish, then the classic commands.
+func RunKind(cfg *config.Config) (mode, currency string) {
+	commands := cfg.Features.Commands
+	switch {
+	case commands["flow"]:
+		return "flow", events.CurrencyCoins
+	case commands["fish"]:
+		if strings.EqualFold(cfg.Features.Fishing.SellMode, "coins") {
+			return "fish", events.CurrencyCoins
+		}
+		return "fish", events.CurrencyTokens
+	}
+	return "classic", events.CurrencyCoins
 }
 
 // Start launches a grinder for the given account id with the given
@@ -45,6 +64,7 @@ func (m *Manager) Start(accountID int64, cfg *config.Config) error {
 		return fmt.Errorf("grinder for account %d already running", accountID)
 	}
 	bus := events.NewBus(512)
+	bus.SetRun(RunKind(cfg))
 	ctx, cancel := context.WithCancel(context.Background())
 	// We run every configured cluster. For MVP each DiscordAccount
 	// stores a single-cluster yaml so this is one cluster per account.
@@ -60,6 +80,7 @@ func (m *Manager) Start(accountID int64, cfg *config.Config) error {
 	// that outlives the server must still see the next run as a new one.
 	m.lastRun = max(m.lastRun+1, time.Now().UnixMilli())
 	m.entries[accountID] = &entry{bus: bus, cancel: cancel, runID: m.lastRun}
+	delete(m.finished, accountID)
 	log.WithField("account_id", accountID).Info("grinder started")
 	return nil
 }
@@ -75,6 +96,7 @@ func (m *Manager) Stop(accountID int64) {
 	}
 	e.cancel()
 	e.bus.Close()
+	m.finished[accountID] = e.bus
 	delete(m.entries, accountID)
 	log.WithField("account_id", accountID).Info("grinder stopped")
 }
@@ -109,6 +131,22 @@ func (m *Manager) Bus(accountID int64) *events.Bus {
 		return nil
 	}
 	return e.bus
+}
+
+// Session returns the running or most recent run's state, or nil if the
+// account hasn't run since the server started.
+func (m *Manager) Session(accountID int64) *events.Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	bus := m.finished[accountID]
+	if e, ok := m.entries[accountID]; ok {
+		bus = e.bus
+	}
+	if bus == nil {
+		return nil
+	}
+	s := bus.Session()
+	return &s
 }
 
 // StopAll cancels every running grinder. Called from the server's

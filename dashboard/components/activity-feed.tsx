@@ -24,7 +24,6 @@ import {
   Waypoints,
 } from "lucide-react";
 import type { GrinderEvent } from "@/lib/api";
-import type { FeedEvent } from "@/lib/farm-session";
 import { cn, fmtCommas, fmtTime } from "@/lib/utils";
 import { Panel, PanelHeader, Segmented, TONE_TEXT, Tone } from "@/components/ui";
 
@@ -102,13 +101,13 @@ function describe(ev: GrinderEvent): Line {
   }
 }
 
-const FeedRow = memo(function FeedRow({ ev, running }: { ev: FeedEvent; running: boolean }) {
+const FeedRow = memo(function FeedRow({ ev, running }: { ev: GrinderEvent; running: boolean }) {
   const { icon: Icon, tone, title, detail, value } = describe(ev);
   // A stopped farm is monochrome, so its past events go quiet with it.
   const iconTone = running ? tone : "neutral";
   return (
     <li className="row-enter flex items-start gap-3 px-4 py-1.5 transition-colors hover:bg-surface-raised sm:px-5">
-      <time className="font-mono text-xs leading-5 tabular-nums text-fg-subtle">{fmtTime(ev.time)}</time>
+      <time className="min-w-[11ch] whitespace-nowrap text-right font-mono text-xs leading-5 tabular-nums text-fg-subtle">{fmtTime(ev.time)}</time>
       <Icon className={cn("mt-0.5 size-4 shrink-0", TONE_TEXT[iconTone])} strokeWidth={1.75} aria-hidden />
       <p className="min-w-0 flex-1 break-words text-[13px] leading-5 text-fg">
         {title}
@@ -119,7 +118,7 @@ const FeedRow = memo(function FeedRow({ ev, running }: { ev: FeedEvent; running:
   );
 });
 
-export function ActivityFeed({ events, running }: { events: FeedEvent[]; running: boolean }) {
+export function ActivityFeed({ events, running }: { events: GrinderEvent[]; running: boolean }) {
   const [filter, setFilter] = useState<Filter>("all");
 
   const issues = useMemo(() => events.filter((ev) => describe(ev).group === "issues").length, [events]);

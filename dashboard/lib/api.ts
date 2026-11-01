@@ -90,6 +90,8 @@ export const accounts = {
 // ---------------------------------------------------------------------------
 
 export interface GrinderEvent {
+  id: number; // orders a run's events
+  session: FarmSession | null; // the run's state right after this event
   kind: string;
   command: string;
   message: string;
@@ -130,6 +132,32 @@ export interface FlowPicker {
   choices: string[];
 }
 
+export type Currency = "coins" | "tokens";
+
+/** What a run has done so far. See events.Session on the server. */
+export interface FarmSession {
+  mode: string;
+  currency: Currency; // the one currency this run earns
+  started_at: number;
+  ended_at: number; // 0 while running
+  server_time: number; // when this was taken, for correcting the local clock
+  earned: number;
+  payouts: number;
+  fish: number;
+  item_count: number;
+  items: Record<string, number>;
+  activity: string;
+  account: string;
+  break_until: number; // 0 unless on a break
+  off_shift: boolean;
+  captcha: boolean;
+  gateway_down: boolean;
+  discord_up: boolean;
+  token_rejected: boolean;
+  flow_picker: FlowPicker | null;
+  recent?: GrinderEvent[]; // the feed so far, oldest first
+}
+
 export interface FarmSummary {
   name: string;
   is_running: boolean;
@@ -137,6 +165,9 @@ export interface FarmSummary {
   configured: boolean; // Discord token/guild/channel are all filled in
   flow_picker: FlowPicker | null; // set while the grinder waits on a choice
   token_rejected: boolean; // Discord refused this run's token
+  mode: string; // what the saved settings would run
+  currency: Currency; // and what they would earn
+  session: FarmSession | null; // current or last run, null if none since the server started
 }
 
 export const farm = {

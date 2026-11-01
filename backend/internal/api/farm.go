@@ -19,12 +19,13 @@ import (
 // just add a /api/accounts/* UI on top of the same DB.
 //
 // Routes:
-//   GET    /api/farm             → farm summary ({name, is_running, configured, flow_picker})
-//   GET    /api/farm/config      → yaml text
-//   PUT    /api/farm/config      → save yaml ({config_yaml})
-//   POST   /api/farm/start       → start grinder
-//   POST   /api/farm/stop        → stop grinder
-//   POST   /api/farm/flow-choice → answer the flow picker ({index}, -1 cancels)
+//
+//	GET    /api/farm             → farm summary ({name, is_running, configured, flow_picker, session})
+//	GET    /api/farm/config      → yaml text
+//	PUT    /api/farm/config      → save yaml ({config_yaml})
+//	POST   /api/farm/start       → start grinder
+//	POST   /api/farm/stop        → stop grinder
+//	POST   /api/farm/flow-choice → answer the flow picker ({index}, -1 cancels)
 type FarmHandlers struct {
 	db      *db.DB
 	manager *runtime.Manager
@@ -79,6 +80,10 @@ func (h *FarmHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		cfg.Clusters[0].GuildID != "" &&
 		cfg.Clusters[0].ChannelID != "" &&
 		cfg.Clusters[0].Master.Token != ""
+	mode, currency := "classic", events.CurrencyCoins
+	if cfgErr == nil {
+		mode, currency = runtime.RunKind(cfg)
+	}
 	// run_id changes on every start, so a tab can tell a restart happened
 	// even if it never saw the farm stopped.
 	runID := h.manager.RunID(acc.ID)
@@ -92,6 +97,10 @@ func (h *FarmHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		"configured":     configured,
 		"flow_picker":    bus.FlowPicker(),
 		"token_rejected": bus.TokenRejected(),
+		"mode":           mode,
+		"currency":       currency,
+		// Also set once stopped, so the last run stays on screen.
+		"session": sessionPayload(h.manager.Session(acc.ID)),
 	})
 }
 

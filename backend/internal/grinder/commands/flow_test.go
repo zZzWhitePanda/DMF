@@ -34,6 +34,9 @@ func TestPickerReplaysShareOnePrompt(t *testing.T) {
 	f := &Flow{}
 	m := pickerMessage()
 
+	feed, unsubscribe := bus.Subscribe()
+	defer unsubscribe()
+
 	first := make(chan error, 1)
 	go func() { first <- f.OnResponse(context.Background(), i, m) }()
 
@@ -56,8 +59,6 @@ func TestPickerReplaysShareOnePrompt(t *testing.T) {
 		t.Fatal("replay blocked on the open picker")
 	}
 
-	feed, unsubscribe := bus.Subscribe()
-	defer unsubscribe()
 	ev := <-feed
 	if ev.Kind != events.FlowPickerNeeded || ev.Message != "Your flows" || len(ev.Choices) != 2 {
 		t.Fatalf("unexpected event: %+v", ev)

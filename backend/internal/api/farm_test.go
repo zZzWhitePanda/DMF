@@ -358,3 +358,42 @@ func TestSummaryReportsRejectedTokenUntilNextRun(t *testing.T) {
 		t.Fatal("new run inherited the old rejection")
 	}
 }
+
+// summarySession reads session from GET /api/farm, nil if there isn't one.
+func (s *farmServer) summarySession() *struct {
+	Earned  int   `json:"earned"`
+	EndedAt int64 `json:"ended_at"`
+} {
+	s.t.Helper()
+	var body struct {
+		Session *struct {
+			Earned  int   `json:"earned"`
+			EndedAt int64 `json:"ended_at"`
+		} `json:"session"`
+	}
+	w := s.do("licensed", http.MethodGet, "/api/farm", "")
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		s.t.Fatal(err)
+	}
+	return body.Session
+}
+
+func TestSummaryKeepsTheLastRunUntilTheNextStarts(t *testing.T) {
+	s := newFarmServer(t)
+	if got := s.summarySession(); got != nil {
+		t.Fatalf("session before any run: %+v", got)
+	}
+	bus := s.start()
+	bus.Send(events.Event{Kind: events.CmdSuccess, Reward: 40})
+	if got := s.summarySession(); got == nil || got.Earned != 40 || got.EndedAt != 0 {
+		t.Fatalf("running session: %+v", got)
+	}
+	s.manager.Stop(s.account)
+	if got := s.summarySession(); got == nil || got.Earned != 40 || got.EndedAt == 0 {
+		t.Fatalf("stopped session: %+v", got)
+	}
+	s.start()
+	if got := s.summarySession(); got == nil || got.Earned != 0 {
+		t.Fatalf("new run kept old totals: %+v", got)
+	}
+}

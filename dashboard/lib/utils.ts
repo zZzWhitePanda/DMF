@@ -20,16 +20,11 @@ export function fmtCompact(n: number): string {
 
 const pad = (n: number) => n.toString().padStart(2, "0");
 
-/** Format a unix seconds timestamp as HH:MM:SS. */
+/** Format a unix seconds timestamp as a 12-hour time (e.g. 2:05:09 PM). */
 export function fmtTime(unix: number): string {
   const d = new Date(unix * 1000);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
-/** Format a unix seconds timestamp as HH:MM. */
-export function fmtClock(unix: number): string {
-  const d = new Date(unix * 1000);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const hours = d.getHours();
+  return `${hours % 12 || 12}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${hours < 12 ? "AM" : "PM"}`;
 }
 
 /** Format a span of seconds as a countdown (e.g. 04:32 or 1:04:32). */
@@ -40,10 +35,8 @@ export function fmtCountdown(seconds: number): string {
   return h > 0 ? `${h}:${clock}` : clock;
 }
 
-/** Format a span of seconds as a rough duration (e.g. 42m or 3h 12m). */
-export function fmtDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  if (m < 1) return "under a minute";
-  if (m < 60) return `${m}m`;
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
+/** Format a running time as HH:MM:SS. Hours keep counting past 99. */
+export function fmtElapsed(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }

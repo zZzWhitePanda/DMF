@@ -96,3 +96,30 @@ func TestRunIDIsNewOnEveryStart(t *testing.T) {
 		}
 	}
 }
+
+func TestRunKind(t *testing.T) {
+	cases := []struct {
+		name           string
+		commands       map[string]bool
+		sellMode       string
+		mode, currency string
+	}{
+		{"classic", map[string]bool{"beg": true}, "", "classic", "coins"},
+		{"nothing set", nil, "", "classic", "coins"},
+		{"fish defaults to tokens", map[string]bool{"fish": true}, "", "fish", "tokens"},
+		{"fish for tokens", map[string]bool{"fish": true}, "fish_tokens", "fish", "tokens"},
+		{"fish for coins", map[string]bool{"fish": true}, "COINS", "fish", "coins"},
+		{"flow beats fish", map[string]bool{"flow": true, "fish": true}, "fish_tokens", "flow", "coins"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Features.Commands = c.commands
+			cfg.Features.Fishing.SellMode = c.sellMode
+			mode, currency := RunKind(cfg)
+			if mode != c.mode || currency != c.currency {
+				t.Fatalf("got %s/%s, want %s/%s", mode, currency, c.mode, c.currency)
+			}
+		})
+	}
+}

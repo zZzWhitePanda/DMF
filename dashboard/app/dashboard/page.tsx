@@ -2,28 +2,17 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowRight, KeyRound, Play, RotateCw, ShieldAlert, Square, TriangleAlert, Waypoints } from "lucide-react";
-import { ApiError, FarmSummary, FlowPicker, GrinderEvent, connectFarmWS, farm } from "@/lib/api";
-import {
-  FeedEvent,
-  Metric,
-  Session,
-  applyEvent,
-  freshSession,
-  isFeedEvent,
-  loadSnapshot,
-  saveSnapshot,
-} from "@/lib/farm-session";
+import { ApiError, Currency, FarmSession, FarmSummary, FlowPicker, GrinderEvent, connectFarmWS, farm } from "@/lib/api";
+import { Session, freshSession, isFeedEvent } from "@/lib/farm-session";
 import { useUser } from "@/lib/use-user";
-import { cn, fmtCommas, fmtCompact, fmtCountdown, fmtDuration } from "@/lib/utils";
+import { cn, fmtCommas, fmtCompact, fmtCountdown, fmtElapsed } from "@/lib/utils";
 import { ActivityFeed } from "@/components/activity-feed";
 import { AppShell } from "@/components/app-shell";
-import { EarningsChart } from "@/components/earnings-chart";
 import {
   Banner,
   Button,
   Panel,
   PanelHeader,
-  Segmented,
   ServerError,
   Skeleton,
   StatusDot,
@@ -48,20 +37,20 @@ interface Status {
   detail?: string;
 }
 
-function deriveStatus(summary: FarmSummary, session: Session, connection: Connection, now: number): Status {
+function deriveStatus(summary: FarmSummary, session: Session, connection: Connection, serverNow: number): Status {
   if (!summary.is_running) return { label: "Stopped", tone: "neutral" };
   if (connection === "lost") {
     return { label: "Connection lost", tone: "warn", detail: "Retrying. The farm keeps running on the server." };
   }
-  if (session.tokenRejected) return { label: "Token rejected", tone: "danger" };
+  if (session.token_rejected) return { label: "Token rejected", tone: "danger" };
   if (session.captcha) return { label: "Captcha", tone: "danger" };
-  if (session.flowPicker) return { label: "Waiting on a choice", tone: "warn" };
-  if (session.gatewayDown) return { label: "Reconnecting", tone: "warn", detail: "Lost the Discord gateway" };
-  if (session.breakUntil && session.breakUntil > now) {
-    return { label: "On break", tone: "warn", detail: `Back in ${fmtCountdown(session.breakUntil - now)}` };
+  if (session.flow_picker) return { label: "Waiting on a choice", tone: "warn" };
+  if (session.gateway_down) return { label: "Reconnecting", tone: "warn", detail: "Lost the Discord gateway" };
+  if (session.break_until > serverNow) {
+    return { label: "On break", tone: "warn", detail: `Back in ${fmtCountdown(session.break_until - serverNow)}` };
   }
-  if (session.offShift) return { label: "Off shift", tone: "warn", detail: "Back when the next shift starts" };
-  if (connection === "connecting" || !session.discordUp) return { label: "Connecting to Discord", tone: "neutral" };
+  if (session.off_shift) return { label: "Off shift", tone: "warn", detail: "Back when the next shift starts" };
+  if (connection === "connecting" || !session.discord_up) return { label: "Connecting to Discord", tone: "neutral" };
   return {
     label: "Grinding",
     tone: "live",
@@ -82,31 +71,43 @@ function useNow() {
 }
 
 // Farm — single-grinder dashboard. One user, one farm, one Start/Stop.
-// Everything below the status line is fed live by the WebSocket.
+// Everything below the status line comes from the server's session, kept
+// current by the WebSocket.
 export default function Dashboard() {
   const { user, failed, retry } = useUser();
   const [summary, setSummary] = useState<FarmSummary | null>(null);
   const [session, setSession] = useState<Session>(freshSession);
-  const [events, setEvents] = useState<FeedEvent[]>([]);
+  const [events, setEvents] = useState<GrinderEvent[]>([]);
   const [connection, setConnection] = useState<Connection>("idle");
   const [busy, setBusy] = useState<Action | null>(null);
   const [answering, setAnswering] = useState<number | null>(null);
   const [error, setError] = useState<FarmError | null>(null);
-  const [picked, setPicked] = useState<Metric | null>(null);
+  // Seconds to add to this device's clock to get the server's. Breaks and the
+  // run timer are server times, and a phone's clock can be well off.
+  const [clockOffset, setClockOffset] = useState(0);
   const now = useNow();
+  const serverNow = now + clockOffset;
 
-  const nextId = useRef(0);
-  const lastRun = useRef<number | null>(null);
-  const latest = useRef({ session, events });
-  latest.current = { session, events };
+  const socketLive = useRef(false);
+
+  const showSession = useCallback((full: FarmSession | null) => {
+    if (!full) {
+      setSession(freshSession());
+      setEvents([]);
+      return;
+    }
+    const { recent, ...state } = full;
+    setSession(state);
+    setEvents(recent ?? []);
+    setClockOffset(state.server_time - Math.floor(Date.now() / 1000));
+  }, []);
 
   const loadSummary = useCallback(async () => {
     const next = await farm.summary();
     setSummary(next);
-    // The server's word beats the stored session: this tab may have missed
-    // the one event, or kept a picker that's since been answered.
-    setSession((s) => ({ ...s, flowPicker: next.flow_picker, tokenRejected: next.token_rejected }));
-  }, []);
+    // A live socket is already more current than this response.
+    if (!socketLive.current) showSession(next.session);
+  }, [showSession]);
 
   const refresh = useCallback(async () => {
     try {
@@ -120,24 +121,6 @@ export default function Dashboard() {
     if (user) refresh();
   }, [user, refresh]);
 
-  // Carry the run across page loads for as long as this tab lives.
-  useEffect(() => {
-    const snapshot = loadSnapshot();
-    if (snapshot) {
-      setSession({ ...freshSession(), ...snapshot.session });
-      setEvents(snapshot.events);
-      nextId.current = (snapshot.events.at(-1)?.id ?? -1) + 1;
-    }
-    const save = () => saveSnapshot(latest.current);
-    window.addEventListener("pagehide", save);
-    return () => window.removeEventListener("pagehide", save);
-  }, []);
-
-  const reset = useCallback(() => {
-    setSession(freshSession());
-    setEvents([]);
-  }, []);
-
   const isRunning = !!summary?.is_running;
   const runId = summary?.run_id ?? 0;
   const loaded = summary !== null;
@@ -148,13 +131,10 @@ export default function Dashboard() {
   // run to the next without this tab ever seeing the farm stopped.
   useEffect(() => {
     if (!loaded) return;
-    const before = lastRun.current;
-    lastRun.current = runId;
     if (!runId) {
       setConnection("idle");
       return;
     }
-    if (before !== null && before !== runId) reset();
 
     let cancelled = false;
     let attempts = 0;
@@ -162,16 +142,19 @@ export default function Dashboard() {
     let ws: WebSocket;
 
     const onEvent = (ev: GrinderEvent) => {
-      setSession((s) => applyEvent(s, ev));
-      if (isFeedEvent(ev)) {
-        const row = { ...ev, id: nextId.current++ };
-        setEvents((prev) => [...prev.slice(-(MAX_EVENTS - 1)), row]);
+      if (ev.kind === "session") {
+        socketLive.current = true;
+        showSession(ev.session);
+        return;
       }
+      if (ev.session) setSession(ev.session);
+      if (isFeedEvent(ev)) setEvents((prev) => [...prev.slice(-(MAX_EVENTS - 1)), ev]);
     };
 
     const connect = () => {
       setConnection((c) => (c === "lost" ? c : "connecting"));
       ws = connectFarmWS(onEvent, (farmStopped) => {
+        socketLive.current = false;
         if (cancelled) return;
         if (!farmStopped) setConnection("lost");
         refresh();
@@ -186,10 +169,11 @@ export default function Dashboard() {
 
     return () => {
       cancelled = true;
+      socketLive.current = false;
       clearTimeout(retryTimer);
       ws.close();
     };
-  }, [loaded, runId, refresh, reset]);
+  }, [loaded, runId, refresh, showSession]);
 
   // Nothing pushes to a page with no socket, so look out for a run started
   // elsewhere, such as another tab's Start or Restart. Failures stay quiet:
@@ -218,7 +202,6 @@ export default function Dashboard() {
   const restart = () =>
     run("restart", async () => {
       await farm.stop();
-      reset();
       await farm.start();
     });
 
@@ -227,11 +210,11 @@ export default function Dashboard() {
     setError(null);
     try {
       await farm.answerFlow(index);
-      setSession((s) => ({ ...s, flowPicker: null }));
+      setSession((s) => ({ ...s, flow_picker: null }));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         // Already answered, by a second click or another tab.
-        setSession((s) => ({ ...s, flowPicker: null }));
+        setSession((s) => ({ ...s, flow_picker: null }));
       } else {
         setError({ title: "Couldn't send your choice", message: (e as Error).message });
         await refresh();
@@ -241,7 +224,7 @@ export default function Dashboard() {
     }
   }
 
-  const status = summary ? deriveStatus(summary, session, connection, now) : null;
+  const status = summary ? deriveStatus(summary, session, connection, serverNow) : null;
 
   useEffect(() => {
     document.title = status && isRunning ? `${status.label} · Dank Memer Farm` : "Dank Memer Farm";
@@ -292,7 +275,7 @@ export default function Dashboard() {
                 {error.message}
               </Banner>
             )}
-            {isRunning && session.tokenRejected && (
+            {isRunning && session.token_rejected && (
               <Banner
                 tone="danger"
                 icon={<KeyRound />}
@@ -324,16 +307,22 @@ export default function Dashboard() {
                 Solve it in Discord, then restart the farm to pick up where it left off.
               </Banner>
             )}
-            {isRunning && session.flowPicker && (
-              <FlowPickerBanner picker={session.flowPicker} answering={answering} onAnswer={answerFlow} />
+            {isRunning && session.flow_picker && (
+              <FlowPickerBanner picker={session.flow_picker} answering={answering} onAnswer={answerFlow} />
             )}
 
-            <Earnings session={session} running={isRunning} now={now} picked={picked} onPick={setPicked} />
+            <Earnings
+              session={session}
+              mode={session.started_at ? session.mode : summary.mode}
+              currency={session.started_at ? session.currency : summary.currency}
+              running={isRunning}
+              serverNow={serverNow}
+            />
           </Panel>
 
           <div className="grid gap-4 sm:gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
             <ActivityFeed events={events} running={isRunning} />
-            <Inventory items={session.items} total={session.itemCount} />
+            <Inventory items={session.items} total={session.item_count} />
           </div>
         </div>
       )}
@@ -402,29 +391,25 @@ function FlowPickerBanner({
 
 function Earnings({
   session,
+  mode,
+  currency,
   running,
-  now,
-  picked,
-  onPick,
+  serverNow,
 }: {
   session: Session;
+  mode: string;
+  currency: Currency;
   running: boolean;
-  now: number;
-  picked: Metric | null;
-  onPick: (m: Metric) => void;
+  serverNow: number;
 }) {
-  // Fish mode only earns tokens, so lead with whatever is actually moving.
-  const metric = picked ?? (session.coins === 0 && session.tokens > 0 ? "tokens" : "coins");
-  const other: Metric = metric === "coins" ? "tokens" : "coins";
-  const value = session[metric];
+  const hasRun = session.started_at > 0;
+  const elapsed = hasRun ? (session.ended_at || serverNow) - session.started_at : 0;
+  const value = session.earned;
   const formatted = fmtCommas(value);
-  const elapsed = session.startedAt ? now - session.startedAt : 0;
-  const hasRun = session.startedAt !== null;
-  const showRate = running && elapsed >= 60;
 
   return (
     <>
-      <div className="px-4 pt-5 sm:px-5 sm:pt-6">
+      <div className="px-4 py-5 sm:px-5 sm:py-6">
         <p
           className={cn(
             "whitespace-nowrap font-semibold tracking-[-0.03em]",
@@ -435,51 +420,35 @@ function Earnings({
         >
           {formatted}
         </p>
-        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-          <p className="text-sm text-fg-muted">
-            {metric}{" "}
-            <span className={cn(showRate && "hidden sm:inline")}>
-              {running || !hasRun ? "this session" : "last session"}
-            </span>
-            {showRate && (
-              <span className="text-fg-subtle">
-                {" · "}
-                {fmtCompact(Math.round((value / elapsed) * 3600))}/hr
-                <span className="hidden sm:inline"> over {fmtDuration(elapsed)}</span>
-              </span>
-            )}
-          </p>
-          <Segmented
-            label="Show earnings in"
-            value={metric}
-            onChange={onPick}
-            options={[
-              { value: "coins", label: "Coins" },
-              { value: "tokens", label: "Tokens" },
-            ]}
-          />
-        </div>
-        <div className="mt-1">
-          <EarningsChart timeline={session.timeline} metric={metric} now={now} live={running} />
-        </div>
+        <p className="mt-2.5 text-sm text-fg-muted">
+          {currency === "tokens" ? "fish tokens" : "coins"} {running || !hasRun ? "this session" : "last session"}
+        </p>
       </div>
 
-      <dl className="mt-4 grid grid-cols-2 gap-px border-t border-border bg-border sm:grid-cols-4">
-        <Stat label={other === "tokens" ? "Fish tokens" : "Coins"} value={session[other]} />
-        <Stat label="Fish caught" value={session.fish} />
-        <Stat label="Items found" value={session.itemCount} />
-        <Stat label="Payouts" value={session.payouts} />
+      <dl className="grid grid-cols-2 gap-px border-t border-border bg-border sm:grid-cols-4">
+        <Stat label={running || !hasRun ? "Running for" : "Ran for"} value={fmtElapsed(elapsed)} muted={!hasRun} />
+        <Stat
+          label="Per hour"
+          value={elapsed >= 60 ? fmtCompact(Math.round((value / elapsed) * 3600)) : "—"}
+          muted={value === 0 || elapsed < 60}
+        />
+        {mode === "fish" ? (
+          <Stat label="Fish caught" value={fmtCommas(session.fish)} muted={session.fish === 0} />
+        ) : (
+          <Stat label="Items found" value={fmtCommas(session.item_count)} muted={session.item_count === 0} />
+        )}
+        <Stat label="Payouts" value={fmtCommas(session.payouts)} muted={session.payouts === 0} />
       </dl>
     </>
   );
 }
 
-function Stat({ label, value }: { label: string; value: number }) {
+function Stat({ label, value, muted }: { label: string; value: string; muted?: boolean }) {
   return (
     <div className="bg-surface px-4 py-3.5 sm:px-5">
       <dt className="text-[13px] text-fg-muted">{label}</dt>
-      <dd className={cn("mt-1 text-xl font-semibold tracking-tight", value === 0 ? "text-fg-subtle" : "text-fg")}>
-        {fmtCommas(value)}
+      <dd className={cn("mt-1 text-xl font-semibold tabular-nums tracking-tight", muted ? "text-fg-subtle" : "text-fg")}>
+        {value}
       </dd>
     </div>
   );
@@ -573,7 +542,6 @@ function FarmSkeleton() {
         <div className="p-4 sm:p-5">
           <Skeleton className="h-12 w-64 max-w-full sm:h-16" />
           <Skeleton className="mt-3 h-4 w-40" />
-          <Skeleton className="mt-8 h-40" />
         </div>
       </Panel>
       <div className="grid gap-4 sm:gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
