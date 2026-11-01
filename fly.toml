@@ -10,12 +10,11 @@
 app = "dmf"
 primary_region = "syd"
 
-# Builder: just use the Dockerfile. Fly supports buildpacks too but
-# we've already baked a multi-stage image.
+# Builder: multi-stage Dockerfile under backend/. fly.toml lives at the
+# repo root so the Docker build context sees both backend/ AND dashboard/
+# (the Dockerfile COPYs from both).
 [build]
-  dockerfile = "Dockerfile"
-  # The Dockerfile reaches up a level to COPY backend/* and dashboard/*
-  # so the build context is the repo root.
+  dockerfile = "backend/Dockerfile"
   build-target = "runtime"
 
 # Compute. On the hobby free tier you get 3 shared-cpu-1x machines free.
