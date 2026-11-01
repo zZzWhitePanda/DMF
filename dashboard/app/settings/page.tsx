@@ -10,7 +10,7 @@ import {
   RANDOM_EVENT_HANDLERS,
 } from "@/lib/config";
 import { cn } from "@/lib/utils";
-import { Sidebar } from "../dashboard/page";
+import { Sidebar } from "@/components/sidebar";
 
 // Settings — form-driven editor for the user's single farm config.
 // Loads yaml from backend, mutates via typed form fields, serializes
