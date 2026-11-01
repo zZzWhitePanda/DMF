@@ -314,3 +314,47 @@ func TestFlowChoiceRequiresALicense(t *testing.T) {
 	s.post(`{"index":0}`)
 	unblocked(t, answer)
 }
+
+func (s *farmServer) summaryTokenRejected() bool {
+	s.t.Helper()
+	var body struct {
+		TokenRejected bool `json:"token_rejected"`
+	}
+	w := s.do("licensed", http.MethodGet, "/api/farm", "")
+	if w.Code != http.StatusOK {
+		s.t.Fatalf("summary: %d %s", w.Code, w.Body)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		s.t.Fatal(err)
+	}
+	return body.TokenRejected
+}
+
+// A tab opened after the one-shot event must still learn the token is bad,
+// and a new run must not inherit the old run's rejection.
+func TestSummaryReportsRejectedTokenUntilNextRun(t *testing.T) {
+	s := newFarmServer(t)
+	if s.summaryTokenRejected() {
+		t.Fatal("reported rejected with no farm running")
+	}
+	bus := s.start()
+	if s.summaryTokenRejected() {
+		t.Fatal("reported rejected before Discord refused anything")
+	}
+	bus.Send(events.Event{Kind: events.GatewayDown, Message: "connection reset"})
+	if s.summaryTokenRejected() {
+		t.Fatal("an ordinary disconnect counted as a rejected token")
+	}
+	bus.Send(events.Event{Kind: events.GatewayDown, Outcome: events.OutcomeAuthFailed})
+	if !s.summaryTokenRejected() {
+		t.Fatal("rejected token not reported")
+	}
+	s.manager.Stop(s.account)
+	if s.summaryTokenRejected() {
+		t.Fatal("rejection outlived the run")
+	}
+	s.start()
+	if s.summaryTokenRejected() {
+		t.Fatal("new run inherited the old rejection")
+	}
+}

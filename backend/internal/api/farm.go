@@ -82,14 +82,16 @@ func (h *FarmHandlers) summary(w http.ResponseWriter, r *http.Request) {
 	// run_id changes on every start, so a tab can tell a restart happened
 	// even if it never saw the farm stopped.
 	runID := h.manager.RunID(acc.ID)
-	// flow_picker reaches tabs that weren't connected when the picker's
-	// one-shot event went out, so a closed tab can't strand the grinder.
+	// flow_picker and token_rejected reach tabs that weren't connected when
+	// the one-shot event went out, so a closed tab can't strand the grinder.
+	bus := h.manager.Bus(acc.ID)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"name":        acc.Name,
-		"is_running":  runID != 0,
-		"run_id":      runID,
-		"configured":  configured,
-		"flow_picker": h.manager.Bus(acc.ID).FlowPicker(),
+		"name":           acc.Name,
+		"is_running":     runID != 0,
+		"run_id":         runID,
+		"configured":     configured,
+		"flow_picker":    bus.FlowPicker(),
+		"token_rejected": bus.TokenRejected(),
 	})
 }
 

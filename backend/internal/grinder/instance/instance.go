@@ -615,7 +615,7 @@ func (i *Instance) Run(ctx context.Context) {
 			i.Log.WithError(err).Error("gateway stopped")
 			ev := events.Event{Kind: events.GatewayDown, Message: err.Error()}
 			if errors.Is(err, discord.ErrAuthFailed) {
-				ev.Outcome = "auth_failed"
+				ev.Outcome = events.OutcomeAuthFailed
 			}
 			i.Bus.Send(ev)
 		}

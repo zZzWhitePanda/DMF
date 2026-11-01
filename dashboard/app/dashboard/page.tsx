@@ -104,8 +104,8 @@ export default function Dashboard() {
     const next = await farm.summary();
     setSummary(next);
     // The server's word beats the stored session: this tab may have missed
-    // the picker's one event, or kept one that's since been answered.
-    setSession((s) => ({ ...s, flowPicker: next.flow_picker }));
+    // the one event, or kept a picker that's since been answered.
+    setSession((s) => ({ ...s, flowPicker: next.flow_picker, tokenRejected: next.token_rejected }));
   }, []);
 
   const refresh = useCallback(async () => {

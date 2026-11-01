@@ -136,6 +136,7 @@ export interface FarmSummary {
   run_id: number; // new on every start, 0 while stopped
   configured: boolean; // Discord token/guild/channel are all filled in
   flow_picker: FlowPicker | null; // set while the grinder waits on a choice
+  token_rejected: boolean; // Discord refused this run's token
 }
 
 export const farm = {

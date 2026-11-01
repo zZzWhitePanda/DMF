@@ -49,6 +49,9 @@ type Event struct {
 	Outcome  string
 }
 
+// OutcomeAuthFailed marks a GatewayDown event as Discord refusing the token.
+const OutcomeAuthFailed = "auth_failed"
+
 // FlowPicker is a flow choice the grinder is blocked on.
 type FlowPicker struct {
 	Message string   `json:"message"`
@@ -72,9 +75,10 @@ type Bus struct {
 	flowAnswer  chan int
 	pauseSignal chan bool // TUI → instances; true = pause, false = resume
 
-	subMu  sync.Mutex // guards subs, closed and moves on and off ch
-	subs   map[chan Event]struct{}
-	closed bool
+	subMu         sync.Mutex // guards subs, closed, tokenRejected and moves on and off ch
+	subs          map[chan Event]struct{}
+	closed        bool
+	tokenRejected bool // Discord refused this run's token
 
 	flowMu     sync.Mutex
 	flowPicker *FlowPicker // the picker being waited on, nil if none
@@ -127,6 +131,9 @@ func (b *Bus) Send(e Event) {
 	if b.closed {
 		return
 	}
+	if e.Kind == GatewayDown && e.Outcome == OutcomeAuthFailed {
+		b.tokenRejected = true
+	}
 	if len(b.subs) == 0 {
 		offer(b.ch, e)
 		return
@@ -134,6 +141,17 @@ func (b *Bus) Send(e Event) {
 	for sub := range b.subs {
 		offer(sub, e)
 	}
+}
+
+// TokenRejected reports whether Discord refused this run's token. The event
+// goes out once, so tabs opened later need this to learn about it.
+func (b *Bus) TokenRejected() bool {
+	if b == nil {
+		return false
+	}
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	return b.tokenRejected
 }
 
 // Subscribe returns a channel of every event sent from now on, and a function
