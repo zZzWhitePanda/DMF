@@ -3,26 +3,26 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  Account,
+  FarmSummary,
   GrinderEvent,
-  accounts as accountsAPI,
   auth,
-  connectGrinderWS,
+  connectFarmWS,
+  farm,
 } from "@/lib/api";
 import { cn, fmtCommas, fmtTime } from "@/lib/utils";
 
-// Dashboard — live stats + inventory + event log for the currently-
-// selected account. Switching accounts via the sidebar swaps the WS.
+// Farm — single-grinder dashboard. One user, one farm, one pair of
+// Start/Stop buttons. Stats + inventory + events update live via WS.
 export default function Dashboard() {
   const router = useRouter();
   const [me, setMe] = useState<{ email: string; name: string; picture: string } | null>(null);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedID, setSelectedID] = useState<number | null>(null);
+  const [state, setState] = useState<FarmSummary | null>(null);
   const [events, setEvents] = useState<GrinderEvent[]>([]);
   const [stats, setStats] = useState<Stats>(freshStats());
+  const [error, setError] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Bootstrap: load profile + account list.
+  // Load user + farm summary on mount.
   useEffect(() => {
     (async () => {
       const info = await auth.me();
@@ -35,126 +35,108 @@ export default function Dashboard() {
         name: info.user?.name ?? "",
         picture: info.user?.picture ?? "",
       });
-      const list = await accountsAPI.list();
-      setAccounts(list);
-      if (list.length > 0) setSelectedID(list[0].id);
+      await refresh();
     })();
-  }, [router]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // WebSocket lifecycle — reconnect on account switch.
+  async function refresh() {
+    try {
+      const s = await farm.summary();
+      setState(s);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  // Open WS when running, close when stopped. Reset stats on each start
+  // so numbers reflect THIS session, not the lifetime of the farm.
   useEffect(() => {
-    if (!selectedID) return;
-    const acc = accounts.find((a) => a.id === selectedID);
-    if (!acc?.is_running) return;
+    if (!state?.is_running) {
+      wsRef.current?.close();
+      wsRef.current = null;
+      return;
+    }
     setEvents([]);
     setStats(freshStats());
-    const ws = connectGrinderWS(selectedID, (ev) => {
+    const ws = connectFarmWS((ev) => {
       setEvents((prev) => [...prev.slice(-999), ev]);
       setStats((s) => applyEvent(s, ev));
     });
     wsRef.current = ws;
     return () => ws.close();
-  }, [selectedID, accounts]);
-
-  const selected = accounts.find((a) => a.id === selectedID) ?? null;
+  }, [state?.is_running]);
 
   return (
     <div className="flex min-h-dvh">
-      <aside className="w-64 border-r border-border bg-card px-4 py-6">
-        <div className="mb-6 flex items-center gap-3">
-          <div className="h-6 w-6 rounded bg-accent" />
-          <span className="font-semibold">Dank Memer Farm</span>
-        </div>
-        <nav className="flex flex-col gap-1">
-          <NavItem label="Dashboard" active />
-          <NavItem label="Settings" href="/settings/" />
-          <NavItem label="Logs" href="/logs/" />
-        </nav>
-        <div className="mt-8">
-          <div className="mb-2 text-xs font-medium uppercase text-muted">Accounts</div>
-          <ul className="flex flex-col gap-1">
-            {accounts.map((a) => (
-              <li key={a.id}>
-                <button
-                  onClick={() => setSelectedID(a.id)}
-                  className={cn(
-                    "flex w-full items-center justify-between rounded-md px-3 py-2 text-sm",
-                    a.id === selectedID
-                      ? "bg-accent/15 text-foreground"
-                      : "text-muted hover:bg-border/40 hover:text-foreground",
-                  )}
-                >
-                  <span>{a.name}</span>
-                  <span className={cn("h-2 w-2 rounded-full", a.is_running ? "bg-success" : "bg-muted")} />
-                </button>
-              </li>
-            ))}
-            <li>
-              <NewAccountButton
-                onCreated={(a) => {
-                  setAccounts((prev) => [a, ...prev]);
-                  setSelectedID(a.id);
-                }}
-              />
-            </li>
-          </ul>
-        </div>
-        <div className="mt-auto pt-8">
-          {me && (
-            <div className="flex items-center gap-2 text-xs text-muted">
-              {me.picture && <img src={me.picture} alt="" className="h-6 w-6 rounded-full" />}
-              <span className="truncate">{me.email}</span>
-            </div>
-          )}
-        </div>
-      </aside>
-
+      <Sidebar page="farm" me={me} />
       <main className="flex-1 overflow-auto p-8">
         <header className="mb-8 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-semibold">
-              {selected?.name ?? "No account"}
-            </h1>
+            <h1 className="text-2xl font-semibold">Farm</h1>
             <p className="text-sm text-muted">
-              {selected?.is_running ? "grinding" : "stopped"}
+              {state?.is_running ? (
+                <span className="text-success">● grinding</span>
+              ) : (
+                <span className="text-muted">● stopped</span>
+              )}
             </p>
           </div>
-          {selected && (
-            <div className="flex gap-2">
-              {selected.is_running ? (
-                <button
-                  onClick={async () => {
-                    await accountsAPI.stop(selected.id);
-                    refreshAccounts(setAccounts);
-                  }}
-                  className="rounded-md border border-border bg-card px-4 py-2 text-sm hover:bg-border/40"
-                >
-                  Stop
-                </button>
-              ) : (
-                <button
-                  onClick={async () => {
-                    try {
-                      await accountsAPI.start(selected.id);
-                      refreshAccounts(setAccounts);
-                    } catch (e: unknown) {
-                      alert((e as Error).message);
-                    }
-                  }}
-                  className="rounded-md bg-success px-4 py-2 text-sm font-medium text-background hover:brightness-110"
-                >
-                  Start
-                </button>
-              )}
-            </div>
-          )}
+          <div className="flex items-center gap-3">
+            {error && <span className="text-sm text-error">{error}</span>}
+            {state?.is_running ? (
+              <button
+                onClick={async () => {
+                  try {
+                    await farm.stop();
+                    await refresh();
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+                className="rounded-md border border-border bg-card px-4 py-2 text-sm hover:bg-border/40"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                onClick={async () => {
+                  setError(null);
+                  try {
+                    await farm.start();
+                    await refresh();
+                  } catch (e) {
+                    setError((e as Error).message);
+                  }
+                }}
+                disabled={!state?.configured}
+                className={cn(
+                  "rounded-md px-4 py-2 text-sm font-medium",
+                  state?.configured
+                    ? "bg-success text-background hover:brightness-110"
+                    : "bg-border text-muted cursor-not-allowed",
+                )}
+                title={state?.configured ? "Start grinder" : "Fill in Discord token/guild/channel in Settings first"}
+              >
+                Start
+              </button>
+            )}
+          </div>
         </header>
 
-        {!selected ? (
-          <EmptyState />
-        ) : !selected.is_running ? (
+        {!state ? (
+          <p className="text-muted">Loading...</p>
+        ) : !state.configured ? (
+          <div className="rounded-xl border border-warn/40 bg-warn/5 p-6">
+            <h2 className="text-lg font-medium text-warn">Set up your farm first</h2>
+            <p className="mt-2 text-sm text-muted">
+              Head to <a href="/settings/" className="text-accent underline">Settings</a> and fill in your Discord token,
+              server ID, and channel ID. Then come back and hit Start.
+            </p>
+          </div>
+        ) : !state.is_running ? (
           <div className="rounded-xl border border-border bg-card p-8 text-muted">
-            Grinder is stopped. Click <span className="text-foreground">Start</span> to begin.
+            Farm is stopped. Click <span className="text-foreground">Start</span> to begin grinding.
           </div>
         ) : (
           <div className="grid gap-6">
@@ -207,6 +189,51 @@ export default function Dashboard() {
   );
 }
 
+// --- shared sidebar used across pages ---
+
+export function Sidebar({ page, me }: { page: "farm" | "settings"; me: { email: string; picture: string } | null }) {
+  return (
+    <aside className="flex w-56 flex-col border-r border-border bg-card px-4 py-6">
+      <div className="mb-6 flex items-center gap-3">
+        <div className="h-6 w-6 rounded bg-accent" />
+        <span className="font-semibold">Dank Memer Farm</span>
+      </div>
+      <nav className="flex flex-col gap-1">
+        <NavItem label="Farm" href="/dashboard/" active={page === "farm"} />
+        <NavItem label="Settings" href="/settings/" active={page === "settings"} />
+      </nav>
+      <div className="mt-auto pt-8">
+        {me && (
+          <div className="flex items-center gap-2 text-xs text-muted">
+            {me.picture && <img src={me.picture} alt="" className="h-6 w-6 rounded-full" />}
+            <span className="truncate">{me.email}</span>
+          </div>
+        )}
+        <button
+          onClick={() => auth.logout().then(() => (location.href = "/"))}
+          className="mt-4 text-xs text-muted underline hover:text-foreground"
+        >
+          Sign out
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function NavItem({ label, href, active }: { label: string; href: string; active?: boolean }) {
+  return (
+    <a
+      href={href}
+      className={cn(
+        "rounded-md px-3 py-2 text-sm",
+        active ? "bg-accent/15 text-foreground" : "text-muted hover:bg-border/40 hover:text-foreground",
+      )}
+    >
+      {label}
+    </a>
+  );
+}
+
 function StatCard({ label, value, tone }: { label: string; value: string; tone?: "success" }) {
   return (
     <div className="rounded-xl border border-border bg-card p-5">
@@ -214,49 +241,6 @@ function StatCard({ label, value, tone }: { label: string; value: string; tone?:
       <div className={cn("mt-1 font-mono text-2xl", tone === "success" ? "text-success" : "text-foreground")}>
         {value}
       </div>
-    </div>
-  );
-}
-
-function NavItem({ label, href, active }: { label: string; href?: string; active?: boolean }) {
-  const cls = cn(
-    "block rounded-md px-3 py-2 text-sm",
-    active ? "bg-accent/15 text-foreground" : "text-muted hover:bg-border/40 hover:text-foreground",
-  );
-  return href ? (
-    <a href={href} className={cls}>
-      {label}
-    </a>
-  ) : (
-    <span className={cls}>{label}</span>
-  );
-}
-
-function NewAccountButton({ onCreated }: { onCreated: (a: Account) => void }) {
-  return (
-    <button
-      onClick={async () => {
-        const name = window.prompt("Name this account:");
-        if (!name) return;
-        try {
-          const acc = await accountsAPI.create(name);
-          onCreated(acc);
-        } catch (e: unknown) {
-          alert((e as Error).message);
-        }
-      }}
-      className="mt-2 rounded-md border border-dashed border-border px-3 py-2 text-sm text-muted hover:border-muted hover:text-foreground"
-    >
-      + Add account
-    </button>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="rounded-xl border border-border bg-card p-10 text-center">
-      <h2 className="text-lg font-medium">No accounts yet</h2>
-      <p className="mt-2 text-sm text-muted">Create one from the sidebar.</p>
     </div>
   );
 }
@@ -325,15 +309,6 @@ function EventLine({ ev }: { ev: GrinderEvent }) {
   }
 }
 
-async function refreshAccounts(setter: (next: Account[]) => void) {
-  const list = await accountsAPI.list();
-  setter(list);
-}
-
-// ---------------------------------------------------------------------------
-// derived stats
-// ---------------------------------------------------------------------------
-
 interface Stats {
   balance: number;
   tokens: number;
@@ -348,9 +323,8 @@ function freshStats(): Stats {
 
 function applyEvent(s: Stats, ev: GrinderEvent): Stats {
   switch (ev.kind) {
-    case "cmd_success": {
+    case "cmd_success":
       return { ...s, balance: s.balance + (ev.reward || 0), runs: s.runs + 1 };
-    }
     case "item": {
       const items = { ...s.items };
       if (ev.items) {

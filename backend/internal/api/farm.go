@@ -1,0 +1,166 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/zZzWhitePanda/DMF/backend/internal/auth"
+	"github.com/zZzWhitePanda/DMF/backend/internal/db"
+	"github.com/zZzWhitePanda/DMF/backend/internal/grinder/config"
+	"github.com/zZzWhitePanda/DMF/backend/internal/runtime"
+)
+
+// FarmHandlers exposes a simplified single-grinder API. Each user has
+// exactly ONE farm (one Discord account they grind on); this handler
+// hides the underlying multi-account DB from the frontend so the UI
+// doesn't need an account picker. If we ever want multi-grinder we
+// just add a /api/accounts/* UI on top of the same DB.
+//
+// Routes:
+//   GET    /api/farm            → farm summary ({name, is_running, has_config})
+//   GET    /api/farm/config     → yaml text
+//   PUT    /api/farm/config     → save yaml ({config_yaml})
+//   POST   /api/farm/start      → start grinder
+//   POST   /api/farm/stop       → stop grinder
+type FarmHandlers struct {
+	db      *db.DB
+	manager *runtime.Manager
+}
+
+func NewFarmHandlers(d *db.DB, m *runtime.Manager) *FarmHandlers {
+	return &FarmHandlers{db: d, manager: m}
+}
+
+func (h *FarmHandlers) Register(mux *http.ServeMux) {
+	mux.HandleFunc("/api/farm", h.summary)
+	mux.HandleFunc("/api/farm/config", h.config)
+	mux.HandleFunc("/api/farm/start", h.start)
+	mux.HandleFunc("/api/farm/stop", h.stop)
+}
+
+// getOrCreate returns the user's single farm account, creating a
+// default-config one on first call. All /api/farm/* handlers go
+// through this so the frontend never sees an "add account" step.
+func (h *FarmHandlers) getOrCreate(r *http.Request, user *db.User) (*db.DiscordAccount, error) {
+	accounts, err := h.db.ListAccounts(r.Context(), user.GoogleID)
+	if err != nil {
+		return nil, err
+	}
+	if len(accounts) > 0 {
+		return &accounts[0], nil
+	}
+	id, err := h.db.CreateAccount(r.Context(), db.DiscordAccount{
+		GoogleID:   user.GoogleID,
+		Name:       "my farm",
+		ConfigYAML: defaultConfigYAML,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return h.db.GetAccount(r.Context(), id, user.GoogleID)
+}
+
+func (h *FarmHandlers) summary(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	acc, err := h.getOrCreate(r, user)
+	if err != nil || acc == nil {
+		writeError(w, http.StatusInternalServerError, "farm lookup failed")
+		return
+	}
+	// has_config is "do the Discord creds have real values in them?" so
+	// the frontend can prompt the user to visit Settings before letting
+	// them click Start.
+	cfg, cfgErr := config.Parse([]byte(acc.ConfigYAML))
+	configured := cfgErr == nil && len(cfg.Clusters) > 0 &&
+		cfg.Clusters[0].GuildID != "" &&
+		cfg.Clusters[0].ChannelID != "" &&
+		cfg.Clusters[0].Master.Token != ""
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"name":       acc.Name,
+		"is_running": h.manager.IsRunning(acc.ID),
+		"configured": configured,
+	})
+}
+
+func (h *FarmHandlers) config(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	acc, err := h.getOrCreate(r, user)
+	if err != nil || acc == nil {
+		writeError(w, http.StatusInternalServerError, "farm lookup failed")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/x-yaml")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(acc.ConfigYAML))
+	case http.MethodPut:
+		var body struct {
+			ConfigYAML string `json:"config_yaml"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		// Validate the submitted yaml via the grinder's own parser so
+		// bad shapes don't poison the DB.
+		if _, err := config.Parse([]byte(body.ConfigYAML)); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid config: "+err.Error())
+			return
+		}
+		if err := h.db.UpdateAccountConfig(r.Context(), acc.ID, user.GoogleID, body.ConfigYAML); err != nil {
+			writeError(w, http.StatusInternalServerError, "save failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *FarmHandlers) start(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	acc, err := h.getOrCreate(r, user)
+	if err != nil || acc == nil {
+		writeError(w, http.StatusInternalServerError, "farm lookup failed")
+		return
+	}
+	if h.manager.IsRunning(acc.ID) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "already_running"})
+		return
+	}
+	cfg, err := config.Parse([]byte(acc.ConfigYAML))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid config in settings: "+err.Error())
+		return
+	}
+	if err := h.manager.Start(acc.ID, cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "start failed: "+err.Error())
+		return
+	}
+	_ = h.db.SetAccountRunning(r.Context(), acc.ID, true)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}
+
+func (h *FarmHandlers) stop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	user := auth.UserFromContext(r.Context())
+	acc, err := h.getOrCreate(r, user)
+	if err != nil || acc == nil {
+		writeError(w, http.StatusInternalServerError, "farm lookup failed")
+		return
+	}
+	h.manager.Stop(acc.ID)
+	_ = h.db.SetAccountRunning(r.Context(), acc.ID, false)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+// /api/farm/ws lives in ws.go next to the other WebSocket endpoint —
+// both share one pump helper.

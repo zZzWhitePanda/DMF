@@ -82,8 +82,13 @@ func main() {
 
 	// Licensed API routes.
 	licensedMux := http.NewServeMux()
+	// New-style single-farm endpoints (what the dashboard uses).
+	farmHandlers := api.NewFarmHandlers(database, manager)
+	farmHandlers.Register(licensedMux)
+	// Legacy multi-account endpoints (kept for future multi-grinder UI).
 	accountHandlers := api.NewAccountHandlers(database, manager)
 	accountHandlers.Register(licensedMux)
+	// WebSocket (both the per-account /api/ws/{id} and /api/farm/ws live here).
 	wsHandlers := api.NewWSHandlers(database, manager, []string{cfg.PublicURL})
 	wsHandlers.Register(licensedMux)
 	// RequireAuth → RequireLicensed → handlers.

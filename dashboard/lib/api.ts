@@ -118,3 +118,48 @@ export function connectGrinderWS(
   ws.onclose = () => onClose?.();
   return ws;
 }
+
+// ---------------------------------------------------------------------------
+// farm — single-account convenience API used by the simplified dashboard.
+// Each logged-in user has exactly one farm; the backend auto-creates it
+// on first call so the UI never needs an "add account" step.
+// ---------------------------------------------------------------------------
+
+export interface FarmSummary {
+  name: string;
+  is_running: boolean;
+  configured: boolean; // Discord token/guild/channel are all filled in
+}
+
+export const farm = {
+  summary: () => request<FarmSummary>("/api/farm"),
+  getConfig: async (): Promise<string> => {
+    const res = await fetch("/api/farm/config", { credentials: "include" });
+    if (!res.ok) throw new ApiError(res.status, "", await res.text());
+    return res.text();
+  },
+  saveConfig: (config_yaml: string) =>
+    request<{ ok: true }>("/api/farm/config", {
+      method: "PUT",
+      body: JSON.stringify({ config_yaml }),
+    }),
+  start: () => request<{ status: string }>("/api/farm/start", { method: "POST" }),
+  stop: () => request<{ status: string }>("/api/farm/stop", { method: "POST" }),
+};
+
+export function connectFarmWS(
+  onEvent: (ev: GrinderEvent) => void,
+  onClose?: () => void,
+): WebSocket {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/api/farm/ws`);
+  ws.onmessage = (msg) => {
+    try {
+      onEvent(JSON.parse(msg.data));
+    } catch {
+      // swallow bad frames
+    }
+  };
+  ws.onclose = () => onClose?.();
+  return ws;
+}

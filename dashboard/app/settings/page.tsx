@@ -3,29 +3,24 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
-import {
-  Account,
-  accounts as accountsAPI,
-  auth,
-} from "@/lib/api";
+import { auth, farm } from "@/lib/api";
 import {
   COMMAND_TOGGLES,
   GrinderConfig,
   RANDOM_EVENT_HANDLERS,
 } from "@/lib/config";
 import { cn } from "@/lib/utils";
+import { Sidebar } from "../dashboard/page";
 
-// Settings — form-driven editor for a Discord account's grinder config.
+// Settings — form-driven editor for the user's single farm config.
 // Loads yaml from backend, mutates via typed form fields, serializes
 // back to yaml on save. Fields the UI doesn't know about round-trip
 // untouched (the whole object is kept between load → save).
 export default function Settings() {
   const router = useRouter();
   const [me, setMe] = useState<{ email: string; picture: string } | null>(null);
-  const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedID, setSelectedID] = useState<number | null>(null);
   const [cfg, setCfg] = useState<GrinderConfig | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,29 +33,17 @@ export default function Settings() {
         return;
       }
       setMe({ email: info.user?.email ?? "", picture: info.user?.picture ?? "" });
-      const list = await accountsAPI.list();
-      setAccounts(list);
-      if (list.length > 0) setSelectedID(list[0].id);
+      try {
+        const yaml = await farm.getConfig();
+        setCfg(yamlParse(yaml) ?? {});
+      } catch (e) {
+        setError("Config load failed: " + (e as Error).message);
+      } finally {
+        setLoading(false);
+      }
     })();
   }, [router]);
 
-  useEffect(() => {
-    if (!selectedID) return;
-    setLoading(true);
-    setError(null);
-    accountsAPI
-      .getConfig(selectedID)
-      .then((yaml) => {
-        try {
-          setCfg(yamlParse(yaml) ?? {});
-        } catch (e) {
-          setError("Config YAML on this account is malformed: " + (e as Error).message);
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [selectedID]);
-
-  // --- mutation helpers ---
   const update = (fn: (c: GrinderConfig) => void) => {
     if (!cfg) return;
     const next = structuredClone(cfg);
@@ -72,12 +55,12 @@ export default function Settings() {
   const cluster = cfg?.clusters?.[0];
 
   async function save() {
-    if (!cfg || !selectedID) return;
+    if (!cfg) return;
     setSaving(true);
     setError(null);
     try {
       const yaml = yamlStringify(cfg);
-      await accountsAPI.saveConfig(selectedID, yaml);
+      await farm.saveConfig(yaml);
       setSavedAt(Date.now());
     } catch (e) {
       setError((e as Error).message);
@@ -88,47 +71,12 @@ export default function Settings() {
 
   return (
     <div className="flex min-h-dvh">
-      <aside className="w-64 border-r border-border bg-card px-4 py-6">
-        <div className="mb-6 flex items-center gap-3">
-          <div className="h-6 w-6 rounded bg-accent" />
-          <span className="font-semibold">Dank Memer Farm</span>
-        </div>
-        <nav className="flex flex-col gap-1">
-          <a href="/dashboard/" className="rounded-md px-3 py-2 text-sm text-muted hover:bg-border/40 hover:text-foreground">
-            Dashboard
-          </a>
-          <span className="rounded-md px-3 py-2 text-sm bg-accent/15 text-foreground">Settings</span>
-        </nav>
-        <div className="mt-8">
-          <div className="mb-2 text-xs font-medium uppercase text-muted">Accounts</div>
-          <ul className="flex flex-col gap-1">
-            {accounts.map((a) => (
-              <li key={a.id}>
-                <button
-                  onClick={() => setSelectedID(a.id)}
-                  className={cn(
-                    "flex w-full items-center justify-between rounded-md px-3 py-2 text-sm",
-                    a.id === selectedID
-                      ? "bg-accent/15 text-foreground"
-                      : "text-muted hover:bg-border/40 hover:text-foreground",
-                  )}
-                >
-                  <span>{a.name}</span>
-                  <span className={cn("h-2 w-2 rounded-full", a.is_running ? "bg-success" : "bg-muted")} />
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </aside>
-
+      <Sidebar page="settings" me={me as { email: string; picture: string } | null} />
       <main className="flex-1 overflow-auto p-8">
         <header className="mb-6 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-semibold">Settings</h1>
-            <p className="text-sm text-muted">
-              {accounts.find((a) => a.id === selectedID)?.name ?? "No account selected"}
-            </p>
+            <p className="text-sm text-muted">Configure your farm</p>
           </div>
           <div className="flex items-center gap-3">
             {savedAt && !saving && <span className="text-sm text-success">Saved</span>}
@@ -148,46 +96,44 @@ export default function Settings() {
           </div>
         </header>
 
-        {!selectedID ? (
-          <p className="text-muted">Pick an account from the sidebar first. Or add one from the Dashboard page.</p>
-        ) : loading || !cfg ? (
+        {loading || !cfg ? (
           <p className="text-muted">Loading config...</p>
         ) : (
-          <div className="grid gap-6">
-            {/* --- Discord --- */}
-            <Section title="Discord">
+          <div className="mx-auto grid max-w-3xl gap-6">
+            {/* Discord */}
+            <Section title="Discord" subtitle="Where to grind + which account to grind as">
               <Field label="Guild (server) ID">
                 <Input
                   value={cluster?.guild_id ?? ""}
-                  onChange={(v) => update((c) => ensureCluster(c).guild_id = v)}
+                  onChange={(v) => update((c) => (ensureCluster(c).guild_id = v))}
                   placeholder="e.g. 1240218048305299517"
                 />
-                <Hint>Right-click your server icon in Discord → Copy Server ID (Developer Mode required).</Hint>
+                <Hint>Right-click your server icon → Copy Server ID (Developer Mode on).</Hint>
               </Field>
               <Field label="Channel ID">
                 <Input
                   value={cluster?.channel_id ?? ""}
-                  onChange={(v) => update((c) => ensureCluster(c).channel_id = v)}
+                  onChange={(v) => update((c) => (ensureCluster(c).channel_id = v))}
                   placeholder="e.g. 1240218096103329793"
                 />
-                <Hint>Right-click the channel → Copy Channel ID. This is where /flow or /fish will run.</Hint>
+                <Hint>The channel where /flow or /fish runs.</Hint>
               </Field>
               <Field label="Discord token">
                 <Input
                   type="password"
                   value={cluster?.master?.token ?? ""}
-                  onChange={(v) => update((c) => ensureCluster(c).master.token = v)}
+                  onChange={(v) => update((c) => (ensureCluster(c).master.token = v))}
                   placeholder="your self-bot token"
                 />
-                <Hint>Never share this. Stored encrypted-at-rest on the server volume.</Hint>
+                <Hint>Stored on the server. Never shared.</Hint>
               </Field>
             </Section>
 
-            {/* --- Commands --- */}
-            <Section title="Commands">
+            {/* Commands */}
+            <Section title="Commands" subtitle="Which commands to run">
               <p className="mb-3 text-sm text-muted">
-                Enable the commands you want to grind. <span className="text-foreground">flow</span> and{" "}
-                <span className="text-foreground">fish</span> are exclusive — turning one on turns the other off and ignores beg/search/hunt.
+                <span className="text-foreground">flow</span> and <span className="text-foreground">fish</span> are
+                exclusive — turning one on turns the other off and ignores beg/search/hunt.
               </p>
               <div className="flex flex-col gap-2">
                 {COMMAND_TOGGLES.map((cmd) => {
@@ -216,7 +162,7 @@ export default function Settings() {
               </div>
             </Section>
 
-            {/* --- Fishing --- */}
+            {/* Fishing */}
             {cfg.features?.commands?.fish && (
               <Section title="Fishing">
                 <Field label="Sell mode">
@@ -234,12 +180,12 @@ export default function Settings() {
                       { value: "coins", label: "Coins" },
                     ]}
                   />
-                  <Hint>Which Sell button the grinder clicks when a bucket fills.</Hint>
+                  <Hint>Which sell button the grinder picks when a bucket fills.</Hint>
                 </Field>
               </Section>
             )}
 
-            {/* --- Breaks --- */}
+            {/* Breaks */}
             <Section title="Humanized Breaks">
               <Toggle
                 label="Enable humanized breaks"
@@ -251,11 +197,11 @@ export default function Settings() {
                     c.features.breaks.enabled = v;
                   })
                 }
-                note="Simulates fatigue — short breaks every so often, big sleep-sized breaks on long runs."
+                note="Simulates fatigue — scattered short breaks + big sleep-sized breaks on long runs."
               />
             </Section>
 
-            {/* --- Random Events --- */}
+            {/* Random Events */}
             <Section title="Random Events">
               <Toggle
                 label="Random Events (master)"
@@ -266,7 +212,7 @@ export default function Settings() {
                     c.features.random_events = v;
                   })
                 }
-                note="Master switch for auto-responding to Dank Random Events."
+                note="Master switch for Dank Random Event auto-responders."
               />
               <Field label="Event Role ID">
                 <Input
@@ -307,8 +253,8 @@ export default function Settings() {
               </div>
             </Section>
 
-            {/* --- Captcha --- */}
-            <Section title="Captcha Alerts">
+            {/* Captcha */}
+            <Section title="Captcha Alerts" subtitle="Get pinged when DM throws a captcha">
               <Field label="Discord webhook URL">
                 <Input
                   value={cfg.captcha?.webhook ?? ""}
@@ -320,7 +266,6 @@ export default function Settings() {
                   }
                   placeholder="https://discord.com/api/webhooks/..."
                 />
-                <Hint>Posts a message when a captcha hits so you can solve it.</Hint>
               </Field>
               <Field label="Your Discord user ID (to @ mention)">
                 <Input
@@ -335,26 +280,6 @@ export default function Settings() {
                 />
               </Field>
             </Section>
-
-            {/* --- Account danger zone --- */}
-            <Section title="Account">
-              <p className="mb-3 text-sm text-muted">
-                Delete this account from the farm. The grinder stops first, then the config is removed.
-              </p>
-              <button
-                onClick={async () => {
-                  if (!selectedID) return;
-                  if (!confirm("Delete this account? This can't be undone.")) return;
-                  await accountsAPI.del(selectedID);
-                  const list = await accountsAPI.list();
-                  setAccounts(list);
-                  setSelectedID(list[0]?.id ?? null);
-                }}
-                className="rounded-md border border-error/50 bg-error/10 px-4 py-2 text-sm text-error hover:bg-error/20"
-              >
-                Delete account
-              </button>
-            </Section>
           </div>
         )}
       </main>
@@ -364,10 +289,12 @@ export default function Settings() {
 
 // --- primitives ---
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
     <section className="rounded-xl border border-border bg-card p-6">
-      <h2 className="mb-4 text-sm font-medium uppercase text-muted">{title}</h2>
+      <h2 className="text-sm font-medium uppercase text-muted">{title}</h2>
+      {subtitle && <p className="mb-4 mt-1 text-xs text-muted">{subtitle}</p>}
+      {!subtitle && <div className="mb-4" />}
       <div className="flex flex-col gap-4">{children}</div>
     </section>
   );

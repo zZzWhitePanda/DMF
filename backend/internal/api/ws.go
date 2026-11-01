@@ -35,7 +35,7 @@ func NewWSHandlers(d *db.DB, m *runtime.Manager, allowedOrigins []string) *WSHan
 			WriteBufferSize: 2048,
 			CheckOrigin: func(r *http.Request) bool {
 				if len(allow) == 0 {
-					return true // dev: allow all
+					return true // dev
 				}
 				return allow[strings.ToLower(r.Header.Get("Origin"))]
 			},
@@ -43,15 +43,17 @@ func NewWSHandlers(d *db.DB, m *runtime.Manager, allowedOrigins []string) *WSHan
 	}
 }
 
-// Register attaches the WS route behind RequireAuth + RequireLicensed.
+// Register attaches both WS endpoints:
+//
+//	/api/ws/{account_id}  — legacy, multi-account aware (keeps working)
+//	/api/farm/ws          — single-farm shorthand (the simplified API)
 func (h *WSHandlers) Register(mux *http.ServeMux) {
-	mux.HandleFunc("/api/ws/", h.ws)
+	mux.HandleFunc("/api/ws/", h.wsByID)
+	mux.HandleFunc("/api/farm/ws", h.wsFarm)
 }
 
-// ws upgrades to a websocket and streams the account's event bus. URL
-// shape: /api/ws/{account_id}. Browser connects after confirming the
-// account belongs to the user via the HTTP APIs.
-func (h *WSHandlers) ws(w http.ResponseWriter, r *http.Request) {
+// wsByID looks up the account by URL path and streams its bus.
+func (h *WSHandlers) wsByID(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFromContext(r.Context())
 	trimmed := strings.TrimPrefix(r.URL.Path, "/api/ws/")
 	id, err := strconv.ParseInt(trimmed, 10, 64)
@@ -69,7 +71,34 @@ func (h *WSHandlers) ws(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "grinder not running for this account")
 		return
 	}
+	h.pump(w, r, bus)
+}
 
+// wsFarm looks up the user's single farm account (creating one if
+// missing) and streams its bus.
+func (h *WSHandlers) wsFarm(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFromContext(r.Context())
+	accounts, err := h.db.ListAccounts(r.Context(), user.GoogleID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "farm lookup failed")
+		return
+	}
+	if len(accounts) == 0 {
+		writeError(w, http.StatusBadRequest, "farm not configured")
+		return
+	}
+	acc := accounts[0]
+	bus := h.manager.Bus(acc.ID)
+	if bus == nil {
+		writeError(w, http.StatusBadRequest, "farm not running")
+		return
+	}
+	h.pump(w, r, bus)
+}
+
+// pump upgrades to a websocket + streams events until the client
+// disconnects or the grinder stops (bus channel closes).
+func (h *WSHandlers) pump(w http.ResponseWriter, r *http.Request, bus *events.Bus) {
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.WithError(err).Debug("ws upgrade failed")
@@ -77,12 +106,8 @@ func (h *WSHandlers) ws(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Pump events from the bus to the socket until the client disconnects
-	// or the grinder stops (bus channel closes).
 	done := make(chan struct{})
 	go func() {
-		// Read loop just drains pings / close frames so the connection
-		// stays alive and we notice client disconnects promptly.
 		conn.SetReadLimit(1024)
 		conn.SetPongHandler(func(string) error {
 			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -124,9 +149,6 @@ func (h *WSHandlers) ws(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// encodeEvent flattens an events.Event into the JSON shape the frontend
-// consumes. Kinds get stringified so the client doesn't need to
-// duplicate the enum.
 func encodeEvent(ev events.Event) ([]byte, error) {
 	return json.Marshal(map[string]interface{}{
 		"kind":     kindToString(ev.Kind),
