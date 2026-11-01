@@ -1,0 +1,41 @@
+# Keep the Docker build context tight. Everything excluded here is
+# either generated inside the Dockerfile (node_modules, next build) or
+# strictly local (databases, env files, Windows binaries).
+#
+# Critical: without this, a Windows-built node_modules from `npm install`
+# on the dev machine gets COPYed into the Linux container by
+# `COPY dashboard/ .` and shadows the fresh `npm ci` output — the
+# bundled `.bin/next` points to `node.exe` which doesn't exist on
+# Linux, and the build fails with "node.exe: not found".
+
+# Node — regenerated inside the dashboard build stage
+**/node_modules/
+**/.next/
+**/out/
+**/npm-debug.log*
+**/yarn-debug.log*
+
+# Go — binaries + local DB
+backend/dmf
+backend/dmf.exe
+backend/memeforge
+backend/memeforge.exe
+**/*.db
+**/*.db-shm
+**/*.db-wal
+
+# Env — contains secrets, never ship
+**/.env
+**/.env.local
+**/*.local
+
+# Git / editor noise
+.git/
+.github/
+.vscode/
+.idea/
+.DS_Store
+
+# Fly artifacts
+.fly/
+fly.toml.bak
