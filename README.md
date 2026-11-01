@@ -1,4 +1,4 @@
-# Memeforge
+# Dank Memer Farm
 
 Web dashboard + always-on backend for the Dank Memer grinder, deployed on Fly.io.
 
@@ -43,7 +43,7 @@ GOOGLE_CLIENT_ID=<YOUR_CLIENT_ID>
 GOOGLE_CLIENT_SECRET=<YOUR_CLIENT_SECRET>
 ADMIN_EMAIL=flynn.zipsin@gmail.com
 PUBLIC_URL=http://localhost:8080
-DATABASE_PATH=./memeforge.db
+DATABASE_PATH=./dmf.db
 ```
 
 Run the server (loads .env via your shell — on Windows PowerShell:
@@ -75,7 +75,7 @@ Open `http://localhost:3000` → "Sign in with Google" → you log in → `licen
 cd backend
 flyctl launch --no-deploy
 # When prompted:
-#   - app name:       memeforge  (or whatever you want — must be globally unique)
+#   - app name:       dmf  (or whatever you want — must be globally unique)
 #   - region:         syd        (or closest to you)
 #   - Postgres:       No
 #   - Redis:          No
@@ -99,7 +99,7 @@ flyctl secrets set \
   MASTER_SECRET=<YOUR_MASTER_SECRET>
 ```
 
-Update `PUBLIC_URL` in `fly.toml` to match the URL Fly assigns (default `https://memeforge.fly.dev`). Also add that URL to your Google OAuth client's **Authorized JavaScript origins** and **Authorized redirect URIs** (as `https://memeforge.fly.dev/auth/google/callback`).
+Update `PUBLIC_URL` in `fly.toml` to match the URL Fly assigns (default `https://dmf.fly.dev`). Also add that URL to your Google OAuth client's **Authorized JavaScript origins** and **Authorized redirect URIs** (as `https://dmf.fly.dev/auth/google/callback`).
 
 **Deploy:**
 
@@ -110,7 +110,7 @@ flyctl deploy --dockerfile Dockerfile --build-arg GO_VERSION=1.26
 
 First build takes 2-4 minutes (compiling Next.js + Go). Subsequent deploys are faster if the Dockerfile layers cache well.
 
-Visit `https://memeforge.fly.dev` → sign in with Google → dashboard loads.
+Visit `https://dmf.fly.dev` → sign in with Google → dashboard loads.
 
 ## redeploying after code changes
 

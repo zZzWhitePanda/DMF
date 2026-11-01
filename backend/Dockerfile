@@ -31,17 +31,17 @@ COPY backend/ .
 RUN rm -rf internal/static/dashboard-build
 COPY --from=dashboard /app/dashboard/out ./internal/static/dashboard-build
 # Build the server binary. CGO_ENABLED=0 because modernc.org/sqlite is pure-Go.
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/memeforge ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/dmf ./cmd/server
 
 # -----------------------------------------------------------------------------
 # Stage 3: runtime
 # -----------------------------------------------------------------------------
 FROM gcr.io/distroless/static-debian12 AS runtime
 WORKDIR /app
-COPY --from=server /out/memeforge /app/memeforge
+COPY --from=server /out/dmf /app/dmf
 # Fly volume mounts at /data; database lives there so it survives
 # deploys. DATABASE_PATH env var is set in fly.toml.
 VOLUME ["/data"]
 EXPOSE 8080
 USER nonroot:nonroot
-ENTRYPOINT ["/app/memeforge"]
+ENTRYPOINT ["/app/dmf"]

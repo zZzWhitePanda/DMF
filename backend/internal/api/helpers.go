@@ -1,4 +1,4 @@
-// Package api is the HTTP + WebSocket surface for the Memeforge
+// Package api is the HTTP + WebSocket surface for the Dank Memer Farm
 // backend. Routes under /auth/* handle Google sign-in; /api/* require
 // authentication; /api/accounts/* additionally require a valid license.
 package api

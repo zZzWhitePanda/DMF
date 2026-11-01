@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Memeforge",
+  title: "Dank Memer Farm",
   description: "Dank Memer grinder dashboard",
 };
 

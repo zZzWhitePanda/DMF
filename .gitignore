@@ -5,8 +5,8 @@ out/
 *.log
 
 # Go
-backend/memeforge
-backend/memeforge.exe
+backend/dmf
+backend/dmf.exe
 backend/*.db
 backend/*.db-*
 backend/internal/static/dashboard-build/*

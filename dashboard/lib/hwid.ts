@@ -4,7 +4,7 @@
 // signals into a hash. Users who clear browser data regenerate a new
 // HWID — they'll have to use the 24h reset flow once per clear.
 
-const STORAGE_KEY = "memeforge_device_id";
+const STORAGE_KEY = "dmf_device_id";
 
 function getOrCreateDeviceID(): string {
   try {

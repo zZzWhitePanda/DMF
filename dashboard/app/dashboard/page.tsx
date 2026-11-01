@@ -63,7 +63,7 @@ export default function Dashboard() {
       <aside className="w-64 border-r border-border bg-card px-4 py-6">
         <div className="mb-6 flex items-center gap-3">
           <div className="h-6 w-6 rounded bg-accent" />
-          <span className="font-semibold">memeforge</span>
+          <span className="font-semibold">Dank Memer Farm</span>
         </div>
         <nav className="flex flex-col gap-1">
           <NavItem label="Dashboard" active />

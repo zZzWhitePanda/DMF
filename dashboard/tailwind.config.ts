@@ -6,7 +6,7 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Memeforge palette — matches the TUI's accent/success/warn/error.
+        // Dank Memer Farm palette — matches the TUI's accent/success/warn/error.
         accent: {
           DEFAULT: "#7F5AF0",
           foreground: "#FFFFFE",

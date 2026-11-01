@@ -1,5 +1,5 @@
 // Package db wraps a SQLite connection pool and typed queries for the
-// Memeforge backend. Uses modernc.org/sqlite — a pure-Go port with no
+// Dank Memer Farm backend. Uses modernc.org/sqlite — a pure-Go port with no
 // CGO requirement, so the Fly.io Dockerfile stays tiny and deploys fast.
 package db
 

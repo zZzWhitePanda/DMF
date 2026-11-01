@@ -1,4 +1,4 @@
--- Memeforge database schema.
+-- Dank Memer Farm database schema.
 --
 -- SQLite over a Fly volume mount. The volume is persistent across deploys
 -- so license + account state survives container restarts. If we ever

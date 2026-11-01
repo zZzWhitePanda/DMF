@@ -1,4 +1,4 @@
-// Memeforge backend server.
+// Dank Memer Farm backend server.
 //
 // Serves:
 //   - the Next.js dashboard (static files from ./dashboard-build/)
@@ -37,8 +37,8 @@ func main() {
 	cfg := loadEnv()
 	validateEnv(cfg)
 
-	// Database — persisted on the Fly volume at /data/memeforge.db.
-	// Locally defaults to ./memeforge.db in the current working dir.
+	// Database — persisted on the Fly volume at /data/dmf.db.
+	// Locally defaults to ./dmf.db in the current working dir.
 	database, err := db.Open(cfg.DatabasePath)
 	if err != nil {
 		log.WithError(err).Fatal("open db failed")
@@ -52,7 +52,7 @@ func main() {
 		RedirectURL:     cfg.PublicURL + "/auth/google/callback",
 		AdminEmail:      cfg.AdminEmail,
 		SessionDuration: 30 * 24 * time.Hour,
-		SessionCookie:   "memeforge_session",
+		SessionCookie:   "dmf_session",
 		SecureCookies:   strings.HasPrefix(cfg.PublicURL, "https://"),
 	}
 	provider := auth.NewGoogleProvider(authCfg)
@@ -108,7 +108,7 @@ func main() {
 		// WriteTimeout is intentionally unset.
 	}
 	go func() {
-		log.WithField("addr", server.Addr).Info("memeforge server listening")
+		log.WithField("addr", server.Addr).Info("dmf server listening")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.WithError(err).Fatal("server failed")
 		}
@@ -141,7 +141,7 @@ func loadEnv() envConfig {
 	return envConfig{
 		Port:               getenv("PORT", "8080"),
 		PublicURL:          getenv("PUBLIC_URL", "http://localhost:8080"),
-		DatabasePath:       getenv("DATABASE_PATH", "./memeforge.db"),
+		DatabasePath:       getenv("DATABASE_PATH", "./dmf.db"),
 		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		AdminEmail:         os.Getenv("ADMIN_EMAIL"),

@@ -34,7 +34,7 @@ export default function Home() {
   if (!state.signed_in) {
     return (
       <Shell>
-        <h1 className="text-3xl font-semibold text-foreground">memeforge</h1>
+        <h1 className="text-3xl font-semibold text-foreground">Dank Memer Farm</h1>
         <p className="text-muted">Sign in to control your Dank Memer grinder.</p>
         <a
           href={auth.signInUrl(hwid)}
