@@ -3,6 +3,7 @@ package discord
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,6 +16,12 @@ import (
 
 // GatewayURL is the default Discord gateway endpoint.
 const GatewayURL = "wss://gateway.discord.gg/?v=10&encoding=json"
+
+// closeAuthFailed is the gateway close code for a token Discord won't accept.
+const closeAuthFailed = 4004
+
+// ErrAuthFailed is returned by Connect when Discord rejects the token.
+var ErrAuthFailed = errors.New("discord rejected the token")
 
 // EventHandler is invoked for a dispatched gateway event's data payload.
 type EventHandler func(data json.RawMessage)
@@ -39,6 +46,10 @@ type Gateway struct {
 
 	ready chan struct{}
 	once  sync.Once
+
+	// OnDisconnect, if set, is called each time the socket drops and a
+	// reconnect is about to be tried. Set before Connect.
+	OnDisconnect func(error)
 }
 
 // NewGateway builds a new Gateway. logger is required.
@@ -65,7 +76,15 @@ func (g *Gateway) Ready() <-chan struct{} { return g.ready }
 // SessionID returns the current session id (valid once Ready() has fired).
 func (g *Gateway) SessionID() string { return g.sessionID }
 
-// Connect runs until ctx is done or a fatal error. Reconnects with backoff on transient errors.
+// isAuthFailure reports whether err is Discord closing the socket over a bad token.
+func isAuthFailure(err error) bool {
+	var closed *websocket.CloseError
+	return errors.As(err, &closed) && closed.Code == closeAuthFailed
+}
+
+// Connect runs until ctx is done or a fatal error. Reconnects with backoff on
+// transient errors. A rejected token is fatal (ErrAuthFailed): retrying the
+// same token can't succeed.
 func (g *Gateway) Connect(ctx context.Context) error {
 	backoff := 5 * time.Second
 	for {
@@ -76,7 +95,13 @@ func (g *Gateway) Connect(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if isAuthFailure(err) {
+			return ErrAuthFailed
+		}
 		g.log.WithError(err).Warnf("gateway run ended, reconnecting in %s", backoff)
+		if g.OnDisconnect != nil {
+			g.OnDisconnect(err)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

@@ -25,6 +25,10 @@ export interface Session {
   offShift: boolean;
   captcha: boolean;
   gatewayDown: boolean;
+  /** Discord has logged this account in. Commands can't run until it has. */
+  discordUp: boolean;
+  /** Discord refused the token. The grinder has stopped trying. */
+  tokenRejected: boolean;
   /** The picker the grinder is blocked on. Only an answer or the server clears it. */
   flowPicker: FlowPicker | null;
 }
@@ -45,11 +49,16 @@ export function freshSession(): Session {
     offShift: false,
     captcha: false,
     gatewayDown: false,
+    discordUp: false,
+    tokenRejected: false,
     flowPicker: null,
   };
 }
 
 const TIMELINE_MINUTES = 60;
+
+/** Only a logged-in grinder sends these, which matters for a tab that missed gateway_up. */
+const LOGGED_IN_EVENTS = new Set(["activity", "cmd_success", "cmd_cooldown", "item", "fish_token", "fish_caught"]);
 
 function earn(s: Session, unix: number, metric: Metric, amount: number) {
   const minute = Math.floor(unix / 60);
@@ -79,6 +88,7 @@ function collect(s: Session, items: Record<string, number> | null) {
 
 export function applyEvent(prev: Session, ev: GrinderEvent): Session {
   const s: Session = { ...prev, startedAt: prev.startedAt ?? ev.time };
+  if (LOGGED_IN_EVENTS.has(ev.kind)) s.discordUp = true;
   switch (ev.kind) {
     case "cmd_success":
       s.coins += ev.reward || 0;
@@ -117,10 +127,13 @@ export function applyEvent(prev: Session, ev: GrinderEvent): Session {
       break;
     case "gateway_up":
       s.gatewayDown = false;
-      s.account = ev.message;
+      s.discordUp = true;
+      s.tokenRejected = false;
+      if (ev.message) s.account = ev.message;
       break;
     case "gateway_down":
       s.gatewayDown = true;
+      s.tokenRejected = ev.outcome === "auth_failed";
       break;
     case "flow_picker":
       s.flowPicker = { message: ev.message, choices: ev.choices ?? [] };

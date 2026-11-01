@@ -10,6 +10,7 @@ import {
   Fish,
   Hourglass,
   Info,
+  KeyRound,
   LucideIcon,
   Moon,
   OctagonAlert,
@@ -90,6 +91,9 @@ function describe(ev: GrinderEvent): Line {
     case "gateway_up":
       return { icon: PlugZap, tone: "neutral", group: "system", title: "Connected to Discord", detail: ev.message };
     case "gateway_down":
+      if (ev.outcome === "auth_failed") {
+        return { icon: KeyRound, tone: "danger", group: "issues", title: "Discord rejected the token" };
+      }
       return { icon: Unplug, tone: "warn", group: "issues", title: "Discord disconnected", detail: ev.message };
     case "success":
       return { icon: Check, tone: "neutral", group: "system", title: ev.message };

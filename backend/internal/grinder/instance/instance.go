@@ -3,6 +3,7 @@ package instance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	nethttp "net/http"
@@ -600,13 +601,23 @@ func (i *Instance) Run(ctx context.Context) {
 			i.Bus.Send(events.Event{Kind: events.GatewayUp, Message: r.User.Username})
 		}
 	})
+	i.Gateway.On("RESUMED", func(json.RawMessage) {
+		i.Bus.Send(events.Event{Kind: events.GatewayUp})
+	})
 	i.Gateway.On("MESSAGE_CREATE", i.onMessage)
 	i.Gateway.On("MESSAGE_UPDATE", i.onMessage)
+	i.Gateway.OnDisconnect = func(err error) {
+		i.Bus.Send(events.Event{Kind: events.GatewayDown, Message: err.Error()})
+	}
 
 	go func() {
 		if err := i.Gateway.Connect(ctx); err != nil {
 			i.Log.WithError(err).Error("gateway stopped")
-			i.Bus.Send(events.Event{Kind: events.GatewayDown, Message: err.Error()})
+			ev := events.Event{Kind: events.GatewayDown, Message: err.Error()}
+			if errors.Is(err, discord.ErrAuthFailed) {
+				ev.Outcome = "auth_failed"
+			}
+			i.Bus.Send(ev)
 		}
 	}()
 

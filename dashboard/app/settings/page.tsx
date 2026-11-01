@@ -166,7 +166,8 @@ export default function Settings() {
                         label="Discord token"
                         secret
                         value={cfg.clusters?.[0]?.master?.token ?? ""}
-                        onChange={(v) => update((c) => (ensureCluster(c).master.token = v))}
+                        // Stray spaces or quotes from pasting make Discord reject the token.
+                        onChange={(v) => update((c) => (ensureCluster(c).master.token = v.trim().replace(/^"|"$/g, "")))}
                         placeholder="Paste your token"
                         hint="Stored on the server. Never shared."
                       />

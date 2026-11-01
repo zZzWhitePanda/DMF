@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, Play, RotateCw, ShieldAlert, Square, TriangleAlert, Waypoints } from "lucide-react";
+import { ArrowRight, KeyRound, Play, RotateCw, ShieldAlert, Square, TriangleAlert, Waypoints } from "lucide-react";
 import { ApiError, FarmSummary, FlowPicker, GrinderEvent, connectFarmWS, farm } from "@/lib/api";
 import {
   FeedEvent,
@@ -52,6 +52,7 @@ function deriveStatus(summary: FarmSummary, session: Session, connection: Connec
   if (connection === "lost") {
     return { label: "Connection lost", tone: "warn", detail: "Retrying. The farm keeps running on the server." };
   }
+  if (session.tokenRejected) return { label: "Token rejected", tone: "danger" };
   if (session.captcha) return { label: "Captcha", tone: "danger" };
   if (session.flowPicker) return { label: "Waiting on a choice", tone: "warn" };
   if (session.gatewayDown) return { label: "Reconnecting", tone: "warn", detail: "Lost the Discord gateway" };
@@ -59,7 +60,7 @@ function deriveStatus(summary: FarmSummary, session: Session, connection: Connec
     return { label: "On break", tone: "warn", detail: `Back in ${fmtCountdown(session.breakUntil - now)}` };
   }
   if (session.offShift) return { label: "Off shift", tone: "warn", detail: "Back when the next shift starts" };
-  if (connection === "connecting") return { label: "Connecting", tone: "neutral" };
+  if (connection === "connecting" || !session.discordUp) return { label: "Connecting to Discord", tone: "neutral" };
   return {
     label: "Grinding",
     tone: "live",
@@ -272,6 +273,22 @@ export default function Dashboard() {
                 }
               >
                 {error.message}
+              </Banner>
+            )}
+            {isRunning && session.tokenRejected && (
+              <Banner
+                tone="danger"
+                icon={<KeyRound />}
+                title="Discord rejected your token"
+                className="border-b border-border"
+                action={
+                  <a href="/settings/#discord" className={buttonStyles({ variant: "danger", size: "sm" })}>
+                    Update token
+                  </a>
+                }
+              >
+                The farm can't log in, so nothing is running. Save a fresh token in Settings, then stop and start the
+                farm.
               </Banner>
             )}
             {isRunning && session.captcha && (
