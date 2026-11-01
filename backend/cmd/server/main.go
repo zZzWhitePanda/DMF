@@ -71,6 +71,15 @@ func main() {
 	authHandlers := api.NewAuthHandlers(provider, database, authCfg)
 	authHandlers.Register(root)
 
+	// License-management routes — auth required, but NOT license-gated
+	// (users without a valid license need to reach the HWID-reset
+	// endpoint to recover). Mounted FIRST so its /api/license/* paths
+	// win over the licensed mux's catchall below.
+	licenseMux := http.NewServeMux()
+	licenseHandlers := api.NewLicenseHandlers(database)
+	licenseHandlers.Register(licenseMux)
+	root.Handle("/api/license/", middleware.RequireAuth(licenseMux))
+
 	// Licensed API routes.
 	licensedMux := http.NewServeMux()
 	accountHandlers := api.NewAccountHandlers(database, manager)
