@@ -48,6 +48,90 @@ type Fish struct {
 	// opening a brand new bucket viewer every time.
 	bucketViewerMsgID         string
 	bucketViewerRefreshCustom string
+
+	// Bucket-full recovery. bucketStreak counts attempts since the last sale,
+	// so a viewer that's gone dead gets replaced instead of retried forever.
+	bucketStreak  int
+	lastBucketTry time.Time
+	lastRestart   time.Time
+	wantBuckets   bool // the next main menu should open Buckets, not fish
+}
+
+const (
+	// A catch screen arrives several times (create, update, resync), so
+	// attempts closer together than this are the same attempt.
+	bucketRetryGap = 20 * time.Second
+	// Each /fish catch leaves a command running, so don't spam them.
+	restartCooldown = 5 * time.Minute
+	// Bucket attempts without a sale before starting over with /fish catch.
+	restartAfterAttempts = 3
+)
+
+type bucketStep int
+
+const (
+	bucketRefresh bucketStep = iota // refresh the viewer we already have
+	bucketOpen                      // open a new viewer from the catch screen
+	bucketRestart                   // run /fish catch, then open Buckets from its menu
+	bucketWait                      // nothing to try yet, keep fishing
+)
+
+// nextBucketStep picks the next recovery for a full bucket. Each failure moves
+// down a rung: refresh the viewer, open a new one, start over with /fish catch.
+// A sale resets it. canOpen is whether this screen has a Buckets button.
+func (f *Fish) nextBucketStep(now time.Time, canOpen bool) bucketStep {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bucketStreak++
+	f.lastBucketTry = now
+	if f.bucketStreak == 1 && f.bucketViewerMsgID != "" && f.bucketViewerRefreshCustom != "" {
+		return bucketRefresh
+	}
+	f.forgetViewerLocked()
+	if f.bucketStreak >= restartAfterAttempts || !canOpen {
+		if now.Sub(f.lastRestart) >= restartCooldown {
+			f.lastRestart = now
+			f.bucketStreak = 0
+			f.wantBuckets = true
+			f.parentCatchMsgID = ""
+			f.parentFishAgainCustom = ""
+			return bucketRestart
+		}
+		if !canOpen {
+			return bucketWait
+		}
+	}
+	return bucketOpen
+}
+
+func (f *Fish) forgetViewerLocked() {
+	f.bucketViewerMsgID = ""
+	f.bucketViewerRefreshCustom = ""
+}
+
+// bucketTryDue says whether this catch screen should start a bucket attempt.
+// alreadySold can't decide alone: a repeat of a fish we've seen before looks
+// like a replay, and skipping those is how the bot used to fish a full bucket
+// forever.
+func (f *Fish) bucketTryDue(now time.Time, alreadySold bool) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !alreadySold || now.Sub(f.lastBucketTry) >= bucketRetryGap
+}
+
+// bucketSold clears the recovery state once a sale goes through.
+func (f *Fish) bucketSold() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bucketStreak = 0
+	f.wantBuckets = false
+	f.seenCatches = make(map[string]bool)
+}
+
+func (f *Fish) restartFishing(i *instance.Instance) error {
+	i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket still full - running /fish catch again to open a new bucket menu"})
+	time.Sleep(humanDelay())
+	return i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}})
 }
 
 func (f *Fish) Name() string { return "fish" }
@@ -210,6 +294,7 @@ func (f *Fish) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 				f.sellingBucket = false
 				f.mu.Unlock()
 				if wasBucketSell {
+					f.bucketSold()
 					go func() {
 						time.Sleep(2 * time.Second)
 						if err := i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}}); err != nil {
@@ -275,17 +360,28 @@ func (f *Fish) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 			f.parentCatchMsgID = ""
 			f.parentFishAgainCustom = ""
 			f.mu.Unlock()
+			if wasBucketSell {
+				f.bucketSold()
+			}
 			if wasBucketSell && parentMsgID != "" && parentCustom != "" {
 				go func() {
 					time.Sleep(2 * time.Second)
 					if err := i.ClickButton(parentMsgID, parentCustom); err != nil {
 						i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("post-sell Fish Again click failed: %v", err)})
+						if err := i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}}); err != nil {
+							i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("resume fish catch failed: %v", err)})
+						}
 					} else {
 						i.Bus.Send(events.Event{Kind: events.Info, Message: "bucket sold, clicked Fish Again on parent to resume"})
 					}
 				}()
 			} else if wasBucketSell {
-				i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket sold but no parent Fish Again stored — waiting for next message update"})
+				go func() {
+					time.Sleep(2 * time.Second)
+					if err := i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}}); err != nil {
+						i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("resume fish catch failed: %v", err)})
+					}
+				}()
 			}
 			return nil
 		}
@@ -347,6 +443,22 @@ func (f *Fish) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 
 	// 4. Main /fish catch menu — click Go Fishing.
 	if isMainFishMenu(text, btns) {
+		f.mu.Lock()
+		wantBuckets := f.wantBuckets
+		f.wantBuckets = false
+		f.mu.Unlock()
+		if wantBuckets {
+			if b := findBucketsButton(btns); b != nil {
+				i.Bus.Send(events.Event{Kind: events.Info, Message: "opening a new bucket menu from the fishing menu"})
+				f.mu.Lock()
+				f.parentCatchMsgID = m.ID
+				f.parentFishAgainCustom = goFishingCustom(btns)
+				f.mu.Unlock()
+				time.Sleep(humanDelay())
+				return i.ClickButtonOnMessage(m, b.CustomID)
+			}
+			i.Bus.Send(events.Event{Kind: events.Warn, Message: "fishing menu has no Buckets button"})
+		}
 		for _, b := range btns {
 			if strings.EqualFold(b.Label, "go fishing") {
 				i.Bus.Send(events.Event{Kind: events.Activity, Activity: "fish"})
@@ -376,6 +488,9 @@ func (f *Fish) handleCaughtFish(ctx context.Context, i *instance.Instance, m *di
 	// a per-catch key to count fish correctly and to reset the sold flag.
 	catchID := extractCatchID(text)
 	f.mu.Lock()
+	if len(f.seenCatches) > 200 {
+		f.seenCatches = make(map[string]bool)
+	}
 	isNewCatch := catchID != "" && !f.seenCatches[catchID]
 	if isNewCatch {
 		f.seenCatches[catchID] = true
@@ -415,14 +530,12 @@ func (f *Fish) handleCaughtFish(ctx context.Context, i *instance.Instance, m *di
 		if strings.Contains(l, "fish again") && !b.Disabled {
 			fishAgainBtn = btns[idx]
 		}
-		if strings.Contains(l, "open buckets") && !b.Disabled {
-			openBucketsBtn = btns[idx]
-		}
 	}
+	openBucketsBtn = findBucketsButton(btns)
 
 	// Bucket-full overflow path: fish won't be kept in the per-fish sell,
 	// so instead open/refresh the bucket viewer and sell everything in bulk.
-	if isBucketFull(text) && openBucketsBtn != nil && !alreadySold {
+	if isBucketFull(text) && f.bucketTryDue(time.Now(), alreadySold) {
 		// Always update parent catch tracking (Fish Again custom_id, even if
 		// currently disabled by cooldown — the id is stable).
 		fishAgainCustom := ""
@@ -438,6 +551,11 @@ func (f *Fish) handleCaughtFish(ctx context.Context, i *instance.Instance, m *di
 		f.parentFishAgainCustom = fishAgainCustom
 		viewerID := f.bucketViewerMsgID
 		refreshCustom := f.bucketViewerRefreshCustom
+		f.mu.Unlock()
+
+		step := f.nextBucketStep(time.Now(), openBucketsBtn != nil)
+
+		f.mu.Lock()
 		// Clear sold flag on existing bucket viewer so Sell All can fire
 		// again after the refresh re-populates it.
 		if viewerID != "" {
@@ -445,20 +563,27 @@ func (f *Fish) handleCaughtFish(ctx context.Context, i *instance.Instance, m *di
 		}
 		f.mu.Unlock()
 
-		// If we already have a bucket viewer open from a previous cycle,
-		// REFRESH it instead of opening a new one. Keeps the channel to
-		// exactly one bucket viewer + one fishing message.
-		if viewerID != "" && refreshCustom != "" {
+		switch step {
+		case bucketRestart:
+			return f.restartFishing(i)
+		case bucketRefresh:
+			// Keeps the channel to one bucket viewer + one fishing message.
 			i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket full - refreshing existing bucket viewer"})
 			time.Sleep(humanDelay())
-			return i.ClickButton(viewerID, refreshCustom)
+			err := i.ClickButton(viewerID, refreshCustom)
+			if err == nil || openBucketsBtn == nil {
+				return err
+			}
+			f.mu.Lock()
+			f.forgetViewerLocked()
+			f.mu.Unlock()
+			fallthrough
+		case bucketOpen:
+			// Its id + refresh button are captured in the viewer handler.
+			i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket full - opening a new bucket menu"})
+			time.Sleep(humanDelay())
+			return i.ClickButtonOnMessage(m, openBucketsBtn.CustomID)
 		}
-
-		// First time: open a new bucket viewer. Its id + refresh button
-		// are captured in the bucket viewer handler below.
-		i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket full - opening Buckets (first time, will refresh next time)"})
-		time.Sleep(humanDelay())
-		return i.ClickButtonOnMessage(m, openBucketsBtn.CustomID)
 	}
 
 	if alreadySold {
@@ -502,6 +627,26 @@ func (f *Fish) handleCaughtFish(ctx context.Context, i *instance.Instance, m *di
 	}
 
 	return nil
+}
+
+// findBucketsButton finds the button that opens the Buckets menu: "Open
+// Buckets" on the catch screen, "View Buckets" on the main fishing menu.
+func findBucketsButton(btns []*discord.MessageComponent) *discord.MessageComponent {
+	for _, b := range btns {
+		if strings.Contains(strings.ToLower(b.Label), "bucket") && !b.Disabled {
+			return b
+		}
+	}
+	return nil
+}
+
+func goFishingCustom(btns []*discord.MessageComponent) string {
+	for _, b := range btns {
+		if strings.EqualFold(b.Label, "go fishing") {
+			return b.CustomID
+		}
+	}
+	return ""
 }
 
 // isBucketFull detects the "no more bucket space" warning on the caught-fish screen.

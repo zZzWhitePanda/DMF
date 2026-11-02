@@ -171,7 +171,7 @@ export interface FarmSummary {
 }
 
 export const farm = {
-  summary: () => request<FarmSummary>("/api/farm"),
+  summary: (full = false) => request<FarmSummary>(full ? "/api/farm?full" : "/api/farm"),
   getConfig: async (): Promise<string> => {
     const res = await fetch("/api/farm/config", { credentials: "include" });
     if (!res.ok) throw new ApiError(res.status, "", await res.text());

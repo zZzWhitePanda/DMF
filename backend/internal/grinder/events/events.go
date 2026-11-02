@@ -61,8 +61,8 @@ const (
 )
 
 // recentEvents is how much of a run's feed the bus keeps for tabs that open
-// later.
-const recentEvents = 200
+// later: several days at the rate a farm normally logs.
+const recentEvents = 10000
 
 // Session is what a run has done so far. The server keeps it so that closing
 // every tab loses nothing, and all tabs show the same numbers.

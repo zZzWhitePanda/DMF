@@ -20,7 +20,7 @@ import {
   buttonStyles,
 } from "@/components/ui";
 
-const MAX_EVENTS = 1000;
+const MAX_EVENTS = 10000;
 const MAX_RETRY_MS = 15_000;
 const STOPPED_POLL_MS = 3_000;
 /** Longest formatted total that still fits a phone at the full hero size. */
@@ -98,27 +98,27 @@ export default function Dashboard() {
     }
     const { recent, ...state } = full;
     setSession(state);
-    setEvents(recent ?? []);
+    if (recent) setEvents(recent);
     setClockOffset(state.server_time - Math.floor(Date.now() / 1000));
   }, []);
 
-  const loadSummary = useCallback(async () => {
-    const next = await farm.summary();
+  const loadSummary = useCallback(async (full = false) => {
+    const next = await farm.summary(full);
     setSummary(next);
     // A live socket is already more current than this response.
     if (!socketLive.current) showSession(next.session);
   }, [showSession]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (full = false) => {
     try {
-      await loadSummary();
+      await loadSummary(full);
     } catch (e) {
       setError({ title: "Couldn't reach the server", message: (e as Error).message });
     }
   }, [loadSummary]);
 
   useEffect(() => {
-    if (user) refresh();
+    if (user) refresh(true);
   }, [user, refresh]);
 
   const isRunning = !!summary?.is_running;

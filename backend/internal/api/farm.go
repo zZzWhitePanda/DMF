@@ -90,6 +90,13 @@ func (h *FarmHandlers) summary(w http.ResponseWriter, r *http.Request) {
 	// flow_picker and token_rejected reach tabs that weren't connected when
 	// the one-shot event went out, so a closed tab can't strand the grinder.
 	bus := h.manager.Bus(acc.ID)
+	// The feed can be thousands of rows and stopped tabs poll this, so it's
+	// only sent to a page that asks for it.
+	state := h.manager.Session(acc.ID)
+	var session interface{} = state
+	if r.URL.Query().Has("full") {
+		session = sessionPayload(state)
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"name":           acc.Name,
 		"is_running":     runID != 0,
@@ -100,7 +107,7 @@ func (h *FarmHandlers) summary(w http.ResponseWriter, r *http.Request) {
 		"mode":           mode,
 		"currency":       currency,
 		// Also set once stopped, so the last run stays on screen.
-		"session": sessionPayload(h.manager.Session(acc.ID)),
+		"session": session,
 	})
 }
 

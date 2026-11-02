@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import type { GrinderEvent } from "@/lib/api";
 import { cn, fmtCommas, fmtTime } from "@/lib/utils";
-import { Panel, PanelHeader, Segmented, TONE_TEXT, Tone } from "@/components/ui";
+import { Button, Panel, PanelHeader, Segmented, TONE_TEXT, Tone } from "@/components/ui";
 
 type Filter = "all" | "rewards" | "issues";
 
@@ -38,7 +38,7 @@ interface Line {
   value?: string;
 }
 
-const RENDERED_ROWS = 200;
+const PAGE_ROWS = 200;
 
 const itemList = (items: GrinderEvent["items"]) =>
   Object.entries(items ?? {})
@@ -120,13 +120,16 @@ const FeedRow = memo(function FeedRow({ ev, running }: { ev: GrinderEvent; runni
 
 export function ActivityFeed({ events, running }: { events: GrinderEvent[]; running: boolean }) {
   const [filter, setFilter] = useState<Filter>("all");
+  const [shown, setShown] = useState(PAGE_ROWS);
 
   const issues = useMemo(() => events.filter((ev) => describe(ev).group === "issues").length, [events]);
 
-  const rows = useMemo(() => {
-    const matching = filter === "all" ? events : events.filter((ev) => describe(ev).group === filter);
-    return matching.slice(-RENDERED_ROWS).reverse();
-  }, [events, filter]);
+  const matching = useMemo(
+    () => (filter === "all" ? events : events.filter((ev) => describe(ev).group === filter)),
+    [events, filter],
+  );
+  const rows = useMemo(() => matching.slice(-shown).reverse(), [matching, shown]);
+  const older = matching.length - rows.length;
 
   return (
     <Panel className="flex h-[440px] min-w-0 flex-col">
@@ -170,6 +173,13 @@ export function ActivityFeed({ events, running }: { events: GrinderEvent[]; runn
           {rows.map((ev) => (
             <FeedRow key={ev.id} ev={ev} running={running} />
           ))}
+          {older > 0 && (
+            <li className="px-4 py-2 sm:px-5">
+              <Button variant="ghost" size="sm" className="w-full" onClick={() => setShown((n) => n + PAGE_ROWS * 5)}>
+                Show older ({fmtCommas(older)} more)
+              </Button>
+            </li>
+          )}
         </ul>
       )}
     </Panel>
