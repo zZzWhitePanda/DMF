@@ -9,6 +9,7 @@ export interface User {
   name: string;
   picture: string;
   isAdmin: boolean;
+  isOwner: boolean;
 }
 
 // Gate for signed-in pages. Anyone without a usable license goes back to the
@@ -31,6 +32,7 @@ export function useUser() {
         name: info.user?.name ?? "",
         picture: info.user?.picture ?? "",
         isAdmin: !!info.user?.is_admin,
+        isOwner: !!info.user?.is_owner,
       });
     } catch {
       setFailed(true);

@@ -38,6 +38,9 @@ func Open(path string) (*DB, error) {
 	if _, err := s.ExecContext(context.Background(), schemaSQL); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(context.Background(), s); err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &DB{sql: s}, nil
 }
 

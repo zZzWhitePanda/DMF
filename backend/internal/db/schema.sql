@@ -16,18 +16,21 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at   INTEGER NOT NULL
 );
 
--- licenses: minted via the admin key-gen site. One license per key, bound
--- to a specific Google ID. The license tracks the HWID the user activated
--- it on; mismatches trigger the 24h-cooldown reset flow.
+-- licenses: minted in the admin console, unclaimed until a buyer redeems the
+-- key, which binds it to their Google ID for good. The license tracks the HWID
+-- the user activated it on; mismatches trigger the 24h-cooldown reset flow.
 CREATE TABLE IF NOT EXISTS licenses (
     key              TEXT PRIMARY KEY,
-    google_id        TEXT NOT NULL,                   -- bound Google account
+    google_id        TEXT,                            -- bound Google account; NULL = unclaimed
     hwid             TEXT,                            -- device fingerprint; NULL = never activated
     last_reset_at    INTEGER NOT NULL DEFAULT 0,      -- unix seconds of last HWID reset (0 = never)
     notes            TEXT,                            -- admin-visible notes (who, why, when)
     created_at       INTEGER NOT NULL,
     expires_at       INTEGER,                         -- NULL = no expiry
     revoked_at       INTEGER,                         -- NULL = active
+    redeemed_at      INTEGER,                         -- NULL = unclaimed
+    paid_cents       INTEGER NOT NULL DEFAULT 0,      -- AUD paid for this key
+    created_by       TEXT,                            -- admin who minted it
     FOREIGN KEY (google_id) REFERENCES users(google_id)
 );
 

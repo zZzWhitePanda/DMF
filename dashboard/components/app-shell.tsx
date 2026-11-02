@@ -7,7 +7,7 @@ import type { User } from "@/lib/use-user";
 import { cn } from "@/lib/utils";
 import { Logo, Skeleton } from "@/components/ui";
 
-type Page = "farm" | "settings";
+type Page = "farm" | "settings" | "admin";
 
 const NAV: { page: Page; label: string; href: string }[] = [
   { page: "farm", label: "Farm", href: "/dashboard/" },
@@ -45,6 +45,7 @@ export function AppShell({
             {NAV.map((item) => (
               <NavItem key={item.page} {...item} active={item.page === page} />
             ))}
+            {user?.isAdmin && <NavItem label="Admin" href="/admin/" active={page === "admin"} />}
           </nav>
           <div className="ml-auto">{user ? <UserMenu user={user} /> : <Skeleton className="size-8 rounded-full" />}</div>
         </div>

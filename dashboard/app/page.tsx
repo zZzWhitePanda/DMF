@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Ban, MonitorSmartphone, ShieldQuestion } from "lucide-react";
-import { auth, MeResponse } from "@/lib/api";
+import { Ban, KeyRound, MonitorSmartphone } from "lucide-react";
+import { auth, license, MeResponse } from "@/lib/api";
 import { computeHWID } from "@/lib/hwid";
 import { fmtCountdown } from "@/lib/utils";
-import { Button, Logo, ServerError, Spinner } from "@/components/ui";
+import { Button, Logo, ServerError, Spinner, TextField } from "@/components/ui";
 
 export default function Home() {
   const router = useRouter();
@@ -44,21 +44,25 @@ export default function Home() {
           <SignIn hwid={hwid} />
         ) : state.license_status === "none" ? (
           <StatusCard
-            icon={<ShieldQuestion />}
-            title="No license on this account"
+            icon={<KeyRound />}
+            title="Enter your license key"
             body={
               <>
-                <span className="text-fg">{state.user?.email}</span> doesn't have a license yet. Ask the admin to mint
-                one.
+                Signed in as <span className="text-fg">{state.user?.email}</span>. The key locks to this account, so
+                make sure it's the right one.
               </>
             }
-          />
+          >
+            <RedeemKey />
+          </StatusCard>
         ) : state.license_status === "inactive" ? (
           <StatusCard
             icon={<Ban />}
-            title="License revoked"
-            body="This license is no longer active. Contact the admin to sort it out."
-          />
+            title="License expired"
+            body="This license is no longer active. Enter a new key to carry on."
+          >
+            <RedeemKey />
+          </StatusCard>
         ) : state.license_status === "hwid_mismatch" ? (
           <HwidMismatch resetAt={state.reset_available_at ?? 0} />
         ) : (
@@ -143,6 +147,44 @@ function StatusCard({
         Sign out
       </button>
     </div>
+  );
+}
+
+function RedeemKey() {
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function redeem() {
+    setBusy(true);
+    setError("");
+    try {
+      await license.redeem(key);
+      location.href = "/dashboard/";
+    } catch (e) {
+      setError((e as Error).message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form
+      className="mt-6 grid w-full gap-3 text-left"
+      onSubmit={(e) => {
+        e.preventDefault();
+        redeem();
+      }}
+    >
+      <TextField label="License key" mono placeholder="DMF-XXXX-XXXX-XXXX-XXXX" value={key} onChange={setKey} />
+      {error && (
+        <p role="alert" className="text-[13px] text-danger">
+          {error}
+        </p>
+      )}
+      <Button type="submit" size="lg" className="w-full" loading={busy} disabled={!key.trim()}>
+        Unlock my farm
+      </Button>
+    </form>
   );
 }
 

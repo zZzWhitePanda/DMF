@@ -21,6 +21,7 @@ func NewLicenseHandlers(d *db.DB) *LicenseHandlers {
 
 func (h *LicenseHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/license/reset-hwid", h.resetHWID)
+	mux.HandleFunc("/api/license/redeem", h.redeem)
 }
 
 // resetHWID rebinds the current user's license to the current browser's

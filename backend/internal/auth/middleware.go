@@ -68,6 +68,24 @@ func (m *Middleware) RequireAuth(next http.Handler) http.Handler {
 	})
 }
 
+// RequireAdmin is HTTP middleware (chained after RequireAuth) that only lets
+// admins through. is_admin is re-read from the database on every request, so
+// removing someone's access takes effect straight away.
+func (m *Middleware) RequireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := UserFromContext(r.Context())
+		if user == nil {
+			writeJSONError(w, http.StatusUnauthorized, "not signed in")
+			return
+		}
+		if !user.IsAdmin {
+			writeJSONError(w, http.StatusForbidden, "admins only")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // RequireLicensed is HTTP middleware (chained after RequireAuth) that
 // additionally gates access on either admin status OR a valid license
 // whose HWID matches the session's HWID. Unlicensed users get a 403

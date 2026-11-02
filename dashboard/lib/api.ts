@@ -39,6 +39,7 @@ export interface MeResponse {
     name: string;
     picture: string;
     is_admin: boolean;
+    is_owner: boolean;
   };
   license_status?: LicenseStatus;
   reset_available_at?: number;
@@ -48,6 +49,51 @@ export const auth = {
   me: () => request<MeResponse>("/auth/me"),
   signInUrl: (hwid: string) => `/auth/google/start?hwid=${encodeURIComponent(hwid)}`,
   logout: () => request<{ ok: true }>("/auth/logout", { method: "POST" }),
+};
+
+export const license = {
+  redeem: (key: string) =>
+    request<{ ok: true }>("/api/license/redeem", { method: "POST", body: JSON.stringify({ key }) }),
+};
+
+// ---------------------------------------------------------------------------
+// admin console
+// ---------------------------------------------------------------------------
+
+export interface KeyRow {
+  key: string;
+  email: string; // who redeemed it, empty if unused
+  device_set: boolean;
+  notes: string;
+  paid_cents: number;
+  created_by: string;
+  created_at: number;
+  redeemed_at: number;
+  expires_at: number;
+  revoked_at: number;
+}
+
+export interface AdminRow {
+  email: string;
+  name: string;
+}
+
+const keyAction = (action: string, key: string) =>
+  request<{ ok: true }>(`/api/admin/keys/${action}`, { method: "POST", body: JSON.stringify({ key }) });
+
+export const admin = {
+  keys: () => request<{ keys: KeyRow[] }>("/api/admin/keys"),
+  mint: (body: { count: number; paid_cents: number; notes: string; expires_days: number }) =>
+    request<{ keys: string[] }>("/api/admin/keys", { method: "POST", body: JSON.stringify(body) }),
+  revoke: (key: string) => keyAction("revoke", key),
+  unrevoke: (key: string) => keyAction("unrevoke", key),
+  resetDevice: (key: string) => keyAction("reset-device", key),
+  admins: () => request<{ admins: AdminRow[]; owner: string }>("/api/admin/admins"),
+  setAdmin: (email: string, isAdmin: boolean) =>
+    request<{ ok: true }>("/api/admin/admins", {
+      method: "POST",
+      body: JSON.stringify({ email, admin: isAdmin }),
+    }),
 };
 
 // ---------------------------------------------------------------------------

@@ -161,6 +161,7 @@ func (h *AuthHandlers) me(w http.ResponseWriter, r *http.Request) {
 			"name":     user.Name,
 			"picture":  user.PictureURL,
 			"is_admin": user.IsAdmin,
+			"is_owner": strings.EqualFold(user.Email, h.cfg.AdminEmail),
 		},
 	}
 	if user.IsAdmin {

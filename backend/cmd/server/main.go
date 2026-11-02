@@ -81,6 +81,11 @@ func main() {
 	licenseHandlers.Register(licenseMux)
 	root.Handle("/api/license/", middleware.RequireAuth(licenseMux))
 
+	// Key and admin console. Same reason to mount it ahead of the catchall.
+	adminMux := http.NewServeMux()
+	api.NewAdminHandlers(database, manager, cfg.AdminEmail).Register(adminMux)
+	root.Handle("/api/admin/", middleware.RequireAuth(middleware.RequireAdmin(adminMux)))
+
 	// Licensed API routes.
 	licensedMux := http.NewServeMux()
 	// New-style single-farm endpoints (what the dashboard uses).
