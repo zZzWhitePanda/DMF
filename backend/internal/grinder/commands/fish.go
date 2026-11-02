@@ -56,12 +56,13 @@ type Fish struct {
 	lastFishCommand time.Time // last /fish catch, however it was triggered
 	lastResponse    time.Time // last message handled, so a live session can be told apart
 	wantBuckets     bool      // the next main menu should open Buckets, not fish
+	openedViewer    bool      // already opened a new menu for this full bucket
 }
 
 const (
 	// A catch screen arrives several times (create, update, resync), so
 	// attempts closer together than this are the same attempt.
-	bucketRetryGap = 20 * time.Second
+	bucketRetryGap = 30 * time.Second
 	// How long the saved bucket menu gets before a new one is opened.
 	replaceViewerAfter = time.Minute
 	// How long a full bucket must go unsold before /fish catch runs again.
@@ -93,6 +94,7 @@ func (f *Fish) nextBucketStep(now time.Time, canOpen bool) bucketStep {
 	unsold := now.Sub(f.bucketFullSince)
 	if unsold >= bucketStuckAfter && now.Sub(f.lastFishCommand) >= fishCommandGap {
 		f.bucketFullSince = now
+		f.openedViewer = false
 		f.wantBuckets = true
 		f.parentCatchMsgID = ""
 		f.parentFishAgainCustom = ""
@@ -102,9 +104,15 @@ func (f *Fish) nextBucketStep(now time.Time, canOpen bool) bucketStep {
 	if unsold < replaceViewerAfter && f.bucketViewerMsgID != "" && f.bucketViewerRefreshCustom != "" {
 		return bucketRefresh
 	}
-	if canOpen {
+	// Opening a menu posts a new message, which Discord labels "used /fish
+	// catch", so this happens once per full bucket. Refreshing doesn't post.
+	if canOpen && !f.openedViewer {
+		f.openedViewer = true
 		f.forgetViewerLocked()
 		return bucketOpen
+	}
+	if f.bucketViewerMsgID != "" && f.bucketViewerRefreshCustom != "" {
+		return bucketRefresh
 	}
 	return bucketWait
 }
@@ -128,6 +136,7 @@ func (f *Fish) bucketSold() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bucketFullSince = time.Time{}
+	f.openedViewer = false
 	f.wantBuckets = false
 }
 
@@ -137,6 +146,7 @@ func (f *Fish) bucketNotFull() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bucketFullSince = time.Time{}
+	f.openedViewer = false
 }
 
 // fishCommandAllowed claims the next /fish catch. Every one goes through here,
@@ -160,8 +170,27 @@ func (f *Fish) shouldInvoke(now time.Time) bool {
 	return !alive && f.fishCommandAllowed(now)
 }
 
-func invokeFishCatch(i *instance.Instance) error {
+// sendFishCatch is the only place /fish catch is sent from. It always says so,
+// in Activity and the server log, along with why.
+func sendFishCatch(i *instance.Instance, reason string) error {
+	i.Log.WithField("reason", reason).Info("fish catch sent")
+	i.Bus.Send(events.Event{Kind: events.Warn, Message: "sent /fish catch: " + reason})
 	return i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}})
+}
+
+// IgnoresCooldownText tells the instance that cooldown-sounding text isn't a
+// reason to back off. Fishing screens can mention waiting, and treating one as
+// a cooldown both drops the screen and shortens the 24 hour cooldown.
+func (f *Fish) IgnoresCooldownText() bool { return true }
+
+// OnStuck runs when Dank Memer has gone quiet for 3 minutes.
+func (f *Fish) OnStuck(i *instance.Instance) {
+	if !f.fishCommandAllowed(time.Now()) {
+		return
+	}
+	if err := sendFishCatch(i, "no Dank Memer activity for 3 minutes"); err != nil {
+		i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("restart fish catch failed: %v", err)})
+	}
 }
 
 // resumeFishing runs /fish catch to get going again after a sale, if the rate
@@ -170,10 +199,8 @@ func (f *Fish) resumeFishing(i *instance.Instance) {
 	if !f.fishCommandAllowed(time.Now()) {
 		return
 	}
-	if err := invokeFishCatch(i); err != nil {
+	if err := sendFishCatch(i, "resuming after a bucket sale"); err != nil {
 		i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("resume fish catch failed: %v", err)})
-	} else {
-		i.Bus.Send(events.Event{Kind: events.Info, Message: "bucket cleared, resuming fishing"})
 	}
 }
 
@@ -181,9 +208,8 @@ func (f *Fish) restartFishing(i *instance.Instance) error {
 	if !f.fishCommandAllowed(time.Now()) {
 		return nil
 	}
-	i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket unsold for 3 minutes - running /fish catch to open a new bucket menu"})
 	time.Sleep(humanDelay())
-	return invokeFishCatch(i)
+	return sendFishCatch(i, "bucket unsold for 3 minutes")
 }
 
 func (f *Fish) Name() string { return "fish" }
@@ -220,7 +246,7 @@ func (f *Fish) Run(ctx context.Context, i *instance.Instance) (time.Duration, er
 	if !f.shouldInvoke(time.Now()) {
 		return fishCommandGap, nil
 	}
-	if err := invokeFishCatch(i); err != nil {
+	if err := sendFishCatch(i, "starting fishing"); err != nil {
 		return 60 * time.Second, err
 	}
 	return 24 * time.Hour, nil
@@ -620,15 +646,20 @@ func (f *Fish) handleCaughtFish(ctx context.Context, i *instance.Instance, m *di
 			i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket full - refreshing existing bucket viewer"})
 			time.Sleep(humanDelay())
 			err := i.ClickButton(viewerID, refreshCustom)
-			if err == nil || openBucketsBtn == nil {
+			f.mu.Lock()
+			opened := f.openedViewer
+			if err != nil {
+				f.forgetViewerLocked()
+				f.openedViewer = true
+			}
+			f.mu.Unlock()
+			if err == nil || opened || openBucketsBtn == nil {
 				return err
 			}
-			f.mu.Lock()
-			f.forgetViewerLocked()
-			f.mu.Unlock()
 			fallthrough
 		case bucketOpen:
 			// Its id + refresh button are captured in the viewer handler.
+			i.Log.Info("bucket menu opened")
 			i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket full - opening a new bucket menu"})
 			time.Sleep(humanDelay())
 			return i.ClickButtonOnMessage(m, openBucketsBtn.CustomID)

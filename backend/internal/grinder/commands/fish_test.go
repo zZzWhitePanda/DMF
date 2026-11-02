@@ -34,8 +34,8 @@ func TestBucketRecoveryFollowsTheClock(t *testing.T) {
 	}{
 		{0, bucketRefresh},
 		{replaceViewerAfter, bucketOpen},
-		{2 * time.Minute, bucketOpen},
-		{bucketStuckAfter - time.Second, bucketOpen},
+		{2 * time.Minute, bucketWait},
+		{bucketStuckAfter - time.Second, bucketWait},
 		{bucketStuckAfter, bucketRestart},
 	}
 	for _, c := range cases {
@@ -45,6 +45,35 @@ func TestBucketRecoveryFollowsTheClock(t *testing.T) {
 	}
 	if !f.wantBuckets {
 		t.Fatal("restart should send the next main menu to Buckets")
+	}
+}
+
+// Each new menu shows in the channel as "used /fish catch", so a stuck bucket
+// must not post one every attempt.
+func TestStuckBucketOpensOneNewMenu(t *testing.T) {
+	f := &Fish{}
+	start := time.Now()
+	opened := 0
+	for at := time.Duration(0); at < bucketStuckAfter; at += bucketRetryGap {
+		if f.nextBucketStep(start.Add(at), true) == bucketOpen {
+			opened++
+		}
+		if opened == 1 && f.bucketViewerMsgID == "" {
+			f.bucketViewerMsgID, f.bucketViewerRefreshCustom = "new", "refresh"
+		}
+	}
+	if opened != 1 {
+		t.Fatalf("opened %d menus, want 1", opened)
+	}
+}
+
+func TestNewBucketGetsANewMenuAgain(t *testing.T) {
+	f := &Fish{}
+	now := time.Now()
+	f.nextBucketStep(now, true)
+	f.bucketSold()
+	if got := f.nextBucketStep(now.Add(time.Hour), true); got != bucketOpen {
+		t.Fatalf("got step %d, want open", got)
 	}
 }
 

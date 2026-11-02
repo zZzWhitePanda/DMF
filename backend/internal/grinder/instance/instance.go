@@ -828,8 +828,35 @@ func (i *Instance) runStuckDetector(ctx context.Context) {
 			Kind:    events.Warn,
 			Message: fmt.Sprintf("stuck detector: no DM activity for %s, resyncing from channel history", idle.Round(time.Second)),
 		})
+		i.pMu.Lock()
+		restarter, ok := i.pendingCmd.(StuckRestarter)
+		i.pMu.Unlock()
+		if ok {
+			restarter.OnStuck(i)
+			i.markActivity()
+			continue
+		}
 		i.resyncFromChannel(ctx)
 	}
+}
+
+// CooldownAgnostic is a Command whose screens can mention waiting without
+// being a cooldown response.
+type CooldownAgnostic interface {
+	IgnoresCooldownText() bool
+}
+
+// StuckRestarter is a Command that restarts itself when the stuck detector
+// fires, instead of replaying old messages.
+type StuckRestarter interface {
+	OnStuck(i *Instance)
+}
+
+func (i *Instance) pendingIgnoresCooldowns() bool {
+	i.pMu.Lock()
+	defer i.pMu.Unlock()
+	c, ok := i.pendingCmd.(CooldownAgnostic)
+	return ok && c.IgnoresCooldownText()
 }
 
 // Resync is the public entry point for command implementations that want
@@ -1060,7 +1087,7 @@ func (i *Instance) onMessage(data json.RawMessage) {
 		return
 	}
 
-	if parser.LooksLikeCooldown(&m) {
+	if parser.LooksLikeCooldown(&m) && !i.pendingIgnoresCooldowns() {
 		i.pMu.Lock()
 		cmd := i.pendingCmd
 		i.pMu.Unlock()
