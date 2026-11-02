@@ -11,78 +11,138 @@ func withViewer() *Fish {
 	return &Fish{bucketViewerMsgID: "viewer", bucketViewerRefreshCustom: "refresh"}
 }
 
-// A dead viewer must be replaced, then the whole menu, never retried forever.
-func TestBucketRecoveryClimbsTheLadder(t *testing.T) {
+// The saved menu keeps being used, and nothing drastic happens early.
+func TestBucketKeepsTheSameMenuAtFirst(t *testing.T) {
 	f := withViewer()
-	now := time.Now()
-	want := []bucketStep{bucketRefresh, bucketOpen, bucketRestart, bucketOpen, bucketOpen, bucketOpen}
-	for n, step := range want {
-		if got := f.nextBucketStep(now, true); got != step {
-			t.Fatalf("attempt %d: got step %d, want %d", n+1, got, step)
+	start := time.Now()
+	for _, after := range []time.Duration{0, 20 * time.Second, 40 * time.Second, 59 * time.Second} {
+		if got := f.nextBucketStep(start.Add(after), true); got != bucketRefresh {
+			t.Fatalf("at %s: got step %d, want refresh", after, got)
 		}
-		now = now.Add(time.Minute)
+	}
+	if f.bucketViewerMsgID == "" {
+		t.Fatal("the saved menu was thrown away")
+	}
+}
+
+func TestBucketRecoveryFollowsTheClock(t *testing.T) {
+	f := withViewer()
+	start := time.Now()
+	cases := []struct {
+		after time.Duration
+		want  bucketStep
+	}{
+		{0, bucketRefresh},
+		{replaceViewerAfter, bucketOpen},
+		{2 * time.Minute, bucketOpen},
+		{bucketStuckAfter - time.Second, bucketOpen},
+		{bucketStuckAfter, bucketRestart},
+	}
+	for _, c := range cases {
+		if got := f.nextBucketStep(start.Add(c.after), true); got != c.want {
+			t.Fatalf("at %s: got step %d, want %d", c.after, got, c.want)
+		}
 	}
 	if !f.wantBuckets {
 		t.Fatal("restart should send the next main menu to Buckets")
 	}
-	if f.bucketViewerMsgID != "" {
-		t.Fatal("the dead viewer was kept")
-	}
 }
 
-func TestBucketRecoveryRestartsAgainAfterTheCooldown(t *testing.T) {
-	f := withViewer()
-	now := time.Now()
-	f.nextBucketStep(now, true)
-	f.nextBucketStep(now, true)
-	if got := f.nextBucketStep(now, true); got != bucketRestart {
+// No screen with a Buckets button is not a reason to rush to /fish catch.
+func TestNoBucketsButtonStillWaitsThreeMinutes(t *testing.T) {
+	f := &Fish{}
+	start := time.Now()
+	if got := f.nextBucketStep(start, false); got != bucketWait {
+		t.Fatalf("got step %d, want wait", got)
+	}
+	if got := f.nextBucketStep(start.Add(bucketStuckAfter-time.Second), false); got != bucketWait {
+		t.Fatalf("got step %d, want wait", got)
+	}
+	if got := f.nextBucketStep(start.Add(bucketStuckAfter), false); got != bucketRestart {
 		t.Fatalf("got step %d, want restart", got)
 	}
-	later := now.Add(restartCooldown)
-	for n := 0; n < restartAfterAttempts-1; n++ {
-		f.nextBucketStep(later, true)
-	}
-	if got := f.nextBucketStep(later, true); got != bucketRestart {
-		t.Fatalf("got step %d, want a second restart", got)
+}
+
+// Past failures must not count against the next bucket.
+func TestClockResetsWhenTheBucketClears(t *testing.T) {
+	for name, clear := range map[string]func(*Fish){"sold": (*Fish).bucketSold, "room again": (*Fish).bucketNotFull} {
+		t.Run(name, func(t *testing.T) {
+			f := withViewer()
+			start := time.Now()
+			f.nextBucketStep(start, true)
+			f.bucketViewerMsgID, f.bucketViewerRefreshCustom = "viewer", "refresh"
+			clear(f)
+			if got := f.nextBucketStep(start.Add(time.Hour), true); got != bucketRefresh {
+				t.Fatalf("got step %d, want refresh", got)
+			}
+		})
 	}
 }
 
-func TestBucketRecoveryWithNoButtonRestarts(t *testing.T) {
-	f := &Fish{}
-	now := time.Now()
-	if got := f.nextBucketStep(now, false); got != bucketRestart {
-		t.Fatalf("got step %d, want restart", got)
-	}
-	if got := f.nextBucketStep(now, false); got != bucketWait {
-		t.Fatalf("during the cooldown got step %d, want wait", got)
-	}
-}
-
-func TestSaleResetsTheLadder(t *testing.T) {
+func TestRestartRespectsTheCommandGap(t *testing.T) {
 	f := withViewer()
-	now := time.Now()
-	f.nextBucketStep(now, true)
-	f.bucketViewerMsgID, f.bucketViewerRefreshCustom = "new", "refresh"
-	f.bucketSold()
-	if got := f.nextBucketStep(now, true); got != bucketRefresh {
-		t.Fatalf("after a sale got step %d, want refresh", got)
+	start := time.Now()
+	f.lastFishCommand = start
+	f.nextBucketStep(start, true)
+	if got := f.nextBucketStep(start.Add(bucketStuckAfter-time.Second), true); got == bucketRestart {
+		t.Fatal("restarted inside the gap")
+	}
+	f.lastFishCommand = start.Add(time.Minute)
+	if got := f.nextBucketStep(start.Add(bucketStuckAfter), true); got == bucketRestart {
+		t.Fatal("restarted inside the gap")
 	}
 }
 
-// A repeat of a fish seen before looks like a replay. It must not hide a full
-// bucket once the last attempt is old.
-func TestBucketTryDue(t *testing.T) {
+func TestFishCommandsAreRateLimited(t *testing.T) {
 	f := &Fish{}
 	now := time.Now()
-	if !f.bucketTryDue(now, false) {
-		t.Fatal("a new catch should try")
+	if !f.fishCommandAllowed(now) {
+		t.Fatal("first command refused")
+	}
+	for _, after := range []time.Duration{0, time.Second, fishCommandGap - time.Second} {
+		if f.fishCommandAllowed(now.Add(after)) {
+			t.Fatalf("allowed a second command after %s", after)
+		}
+	}
+	if !f.fishCommandAllowed(now.Add(fishCommandGap)) {
+		t.Fatal("refused a command after the gap")
+	}
+}
+
+// A "Hold Tight" brings the main loop back to Run every 30 seconds. It must
+// not stack /fish catch commands on a session that's working.
+func TestMainLoopLeavesALiveSessionAlone(t *testing.T) {
+	f := &Fish{}
+	now := time.Now()
+	if !f.shouldInvoke(now) {
+		t.Fatal("the first /fish catch was refused")
+	}
+	for wait := 30 * time.Second; wait < fishCommandGap; wait += 30 * time.Second {
+		if f.shouldInvoke(now.Add(wait)) {
+			t.Fatalf("invoked again after %s", wait)
+		}
+	}
+	f.lastResponse = now.Add(5 * time.Minute)
+	if f.shouldInvoke(now.Add(6 * time.Minute)) {
+		t.Fatal("invoked on a session that just responded")
+	}
+	if !f.shouldInvoke(now.Add(9 * time.Minute)) {
+		t.Fatal("refused to restart a session that went quiet")
+	}
+}
+
+func TestBucketAttemptsAreSpacedOut(t *testing.T) {
+	f := &Fish{}
+	now := time.Now()
+	if !f.bucketTryDue(now) {
+		t.Fatal("first attempt refused")
 	}
 	f.lastBucketTry = now
-	if f.bucketTryDue(now.Add(time.Second), true) {
+	if f.bucketTryDue(now.Add(time.Second)) {
 		t.Fatal("a replay right after an attempt should not retry")
 	}
-	if !f.bucketTryDue(now.Add(bucketRetryGap), true) {
-		t.Fatal("a repeat fish after the gap should try")
+	if !f.bucketTryDue(now.Add(bucketRetryGap)) {
+		t.Fatal("should try again after the gap")
 	}
 }
 

@@ -49,22 +49,25 @@ type Fish struct {
 	bucketViewerMsgID         string
 	bucketViewerRefreshCustom string
 
-	// Bucket-full recovery. bucketStreak counts attempts since the last sale,
-	// so a viewer that's gone dead gets replaced instead of retried forever.
-	bucketStreak  int
-	lastBucketTry time.Time
-	lastRestart   time.Time
-	wantBuckets   bool // the next main menu should open Buckets, not fish
+	// Bucket-full recovery runs on a clock, not a count: a catch screen arrives
+	// several times over, so counting them looks like failure when it isn't.
+	bucketFullSince time.Time // when this bucket filled, zero if it isn't full
+	lastBucketTry   time.Time
+	lastFishCommand time.Time // last /fish catch, however it was triggered
+	lastResponse    time.Time // last message handled, so a live session can be told apart
+	wantBuckets     bool      // the next main menu should open Buckets, not fish
 }
 
 const (
 	// A catch screen arrives several times (create, update, resync), so
 	// attempts closer together than this are the same attempt.
 	bucketRetryGap = 20 * time.Second
-	// Each /fish catch leaves a command running, so don't spam them.
-	restartCooldown = 5 * time.Minute
-	// Bucket attempts without a sale before starting over with /fish catch.
-	restartAfterAttempts = 3
+	// How long the saved bucket menu gets before a new one is opened.
+	replaceViewerAfter = time.Minute
+	// How long a full bucket must go unsold before /fish catch runs again.
+	bucketStuckAfter = 3 * time.Minute
+	// Hard floor between /fish catch commands, whatever asks for one.
+	fishCommandGap = 3 * time.Minute
 )
 
 type bucketStep int
@@ -76,32 +79,34 @@ const (
 	bucketWait                      // nothing to try yet, keep fishing
 )
 
-// nextBucketStep picks the next recovery for a full bucket. Each failure moves
-// down a rung: refresh the viewer, open a new one, start over with /fish catch.
-// A sale resets it. canOpen is whether this screen has a Buckets button.
+// nextBucketStep picks what to do about a full bucket, based on how long it
+// has gone unsold. The saved menu is used for as long as it might work, and
+// /fish catch only runs after bucketStuckAfter of real failure. canOpen is
+// whether this screen has a Buckets button.
 func (f *Fish) nextBucketStep(now time.Time, canOpen bool) bucketStep {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.bucketStreak++
+	if f.bucketFullSince.IsZero() {
+		f.bucketFullSince = now
+	}
 	f.lastBucketTry = now
-	if f.bucketStreak == 1 && f.bucketViewerMsgID != "" && f.bucketViewerRefreshCustom != "" {
+	unsold := now.Sub(f.bucketFullSince)
+	if unsold >= bucketStuckAfter && now.Sub(f.lastFishCommand) >= fishCommandGap {
+		f.bucketFullSince = now
+		f.wantBuckets = true
+		f.parentCatchMsgID = ""
+		f.parentFishAgainCustom = ""
+		f.forgetViewerLocked()
+		return bucketRestart
+	}
+	if unsold < replaceViewerAfter && f.bucketViewerMsgID != "" && f.bucketViewerRefreshCustom != "" {
 		return bucketRefresh
 	}
-	f.forgetViewerLocked()
-	if f.bucketStreak >= restartAfterAttempts || !canOpen {
-		if now.Sub(f.lastRestart) >= restartCooldown {
-			f.lastRestart = now
-			f.bucketStreak = 0
-			f.wantBuckets = true
-			f.parentCatchMsgID = ""
-			f.parentFishAgainCustom = ""
-			return bucketRestart
-		}
-		if !canOpen {
-			return bucketWait
-		}
+	if canOpen {
+		f.forgetViewerLocked()
+		return bucketOpen
 	}
-	return bucketOpen
+	return bucketWait
 }
 
 func (f *Fish) forgetViewerLocked() {
@@ -110,28 +115,75 @@ func (f *Fish) forgetViewerLocked() {
 }
 
 // bucketTryDue says whether this catch screen should start a bucket attempt.
-// alreadySold can't decide alone: a repeat of a fish we've seen before looks
-// like a replay, and skipping those is how the bot used to fish a full bucket
-// forever.
-func (f *Fish) bucketTryDue(now time.Time, alreadySold bool) bool {
+// It goes by time alone: a repeat of a fish we've seen before looks like a
+// replay, and skipping those is how the bot used to fish a full bucket forever.
+func (f *Fish) bucketTryDue(now time.Time) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return !alreadySold || now.Sub(f.lastBucketTry) >= bucketRetryGap
+	return now.Sub(f.lastBucketTry) >= bucketRetryGap
 }
 
 // bucketSold clears the recovery state once a sale goes through.
 func (f *Fish) bucketSold() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.bucketStreak = 0
+	f.bucketFullSince = time.Time{}
 	f.wantBuckets = false
-	f.seenCatches = make(map[string]bool)
+}
+
+// bucketNotFull clears the clock when a catch shows there's room again, such
+// as after a sale made in Discord, so an old bucket can't look stuck.
+func (f *Fish) bucketNotFull() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.bucketFullSince = time.Time{}
+}
+
+// fishCommandAllowed claims the next /fish catch. Every one goes through here,
+// so nothing can run them faster than fishCommandGap.
+func (f *Fish) fishCommandAllowed(now time.Time) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if now.Sub(f.lastFishCommand) < fishCommandGap {
+		return false
+	}
+	f.lastFishCommand = now
+	return true
+}
+
+// shouldInvoke is the main loop's gate for /fish catch: never while the
+// session is still responding, and never faster than fishCommandGap.
+func (f *Fish) shouldInvoke(now time.Time) bool {
+	f.mu.Lock()
+	alive := !f.lastResponse.IsZero() && now.Sub(f.lastResponse) < fishCommandGap
+	f.mu.Unlock()
+	return !alive && f.fishCommandAllowed(now)
+}
+
+func invokeFishCatch(i *instance.Instance) error {
+	return i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}})
+}
+
+// resumeFishing runs /fish catch to get going again after a sale, if the rate
+// limit allows it. If not, the stuck detector picks the session back up.
+func (f *Fish) resumeFishing(i *instance.Instance) {
+	if !f.fishCommandAllowed(time.Now()) {
+		return
+	}
+	if err := invokeFishCatch(i); err != nil {
+		i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("resume fish catch failed: %v", err)})
+	} else {
+		i.Bus.Send(events.Event{Kind: events.Info, Message: "bucket cleared, resuming fishing"})
+	}
 }
 
 func (f *Fish) restartFishing(i *instance.Instance) error {
-	i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket still full - running /fish catch again to open a new bucket menu"})
+	if !f.fishCommandAllowed(time.Now()) {
+		return nil
+	}
+	i.Bus.Send(events.Event{Kind: events.Warn, Message: "bucket unsold for 3 minutes - running /fish catch to open a new bucket menu"})
 	time.Sleep(humanDelay())
-	return i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}})
+	return invokeFishCatch(i)
 }
 
 func (f *Fish) Name() string { return "fish" }
@@ -161,13 +213,14 @@ func (f *Fish) Run(ctx context.Context, i *instance.Instance) (time.Duration, er
 	}
 	f.mu.Unlock()
 
-	err := i.InvokeSlashCommand("fish", []map[string]interface{}{
-		{
-			"type": 1,
-			"name": "catch",
-		},
-	})
-	if err != nil {
+	// Run is meant to happen once, but any "Hold Tight" reply shortens this
+	// command's cooldown to 30 seconds, which brings the main loop back here.
+	// A second /fish catch earns another Hold Tight, so that loops forever
+	// unless a live session is left alone.
+	if !f.shouldInvoke(time.Now()) {
+		return fishCommandGap, nil
+	}
+	if err := invokeFishCatch(i); err != nil {
 		return 60 * time.Second, err
 	}
 	return 24 * time.Hour, nil
@@ -223,6 +276,10 @@ func (f *Fish) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 	if i.State.IsPaused() {
 		return nil
 	}
+
+	f.mu.Lock()
+	f.lastResponse = time.Now()
+	f.mu.Unlock()
 
 	text := buildText(m)
 	btns := discord.CollectButtons(m.Components)
@@ -293,15 +350,11 @@ func (f *Fish) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 				wasBucketSell := f.sellingBucket
 				f.sellingBucket = false
 				f.mu.Unlock()
+				f.bucketSold()
 				if wasBucketSell {
-					f.bucketSold()
 					go func() {
 						time.Sleep(2 * time.Second)
-						if err := i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}}); err != nil {
-							i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("resume fish catch failed: %v", err)})
-						} else {
-							i.Bus.Send(events.Event{Kind: events.Info, Message: "bucket cleared, resuming fishing"})
-						}
+						f.resumeFishing(i)
 					}()
 				}
 				return nil
@@ -360,17 +413,13 @@ func (f *Fish) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 			f.parentCatchMsgID = ""
 			f.parentFishAgainCustom = ""
 			f.mu.Unlock()
-			if wasBucketSell {
-				f.bucketSold()
-			}
+			f.bucketSold()
 			if wasBucketSell && parentMsgID != "" && parentCustom != "" {
 				go func() {
 					time.Sleep(2 * time.Second)
 					if err := i.ClickButton(parentMsgID, parentCustom); err != nil {
 						i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("post-sell Fish Again click failed: %v", err)})
-						if err := i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}}); err != nil {
-							i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("resume fish catch failed: %v", err)})
-						}
+						f.resumeFishing(i)
 					} else {
 						i.Bus.Send(events.Event{Kind: events.Info, Message: "bucket sold, clicked Fish Again on parent to resume"})
 					}
@@ -378,9 +427,7 @@ func (f *Fish) OnResponse(ctx context.Context, i *instance.Instance, m *discord.
 			} else if wasBucketSell {
 				go func() {
 					time.Sleep(2 * time.Second)
-					if err := i.InvokeSlashCommand("fish", []map[string]interface{}{{"type": 1, "name": "catch"}}); err != nil {
-						i.Bus.Send(events.Event{Kind: events.Warn, Message: fmt.Sprintf("resume fish catch failed: %v", err)})
-					}
+					f.resumeFishing(i)
 				}()
 			}
 			return nil
@@ -535,7 +582,9 @@ func (f *Fish) handleCaughtFish(ctx context.Context, i *instance.Instance, m *di
 
 	// Bucket-full overflow path: fish won't be kept in the per-fish sell,
 	// so instead open/refresh the bucket viewer and sell everything in bulk.
-	if isBucketFull(text) && f.bucketTryDue(time.Now(), alreadySold) {
+	if !isBucketFull(text) {
+		f.bucketNotFull()
+	} else if f.bucketTryDue(time.Now()) {
 		// Always update parent catch tracking (Fish Again custom_id, even if
 		// currently disabled by cooldown — the id is stable).
 		fishAgainCustom := ""
