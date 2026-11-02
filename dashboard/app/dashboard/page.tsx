@@ -1,7 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, KeyRound, Play, RotateCw, ShieldAlert, Square, TriangleAlert, Waypoints } from "lucide-react";
+import {
+  ArrowRight,
+  KeyRound,
+  Pause,
+  Play,
+  RotateCw,
+  ShieldAlert,
+  SkipForward,
+  Square,
+  TriangleAlert,
+  Waypoints,
+} from "lucide-react";
 import { ApiError, Currency, FarmSession, FarmSummary, FlowPicker, GrinderEvent, connectFarmWS, farm } from "@/lib/api";
 import { Session, freshSession, isFeedEvent } from "@/lib/farm-session";
 import { useUser } from "@/lib/use-user";
@@ -27,7 +38,7 @@ const STOPPED_POLL_MS = 3_000;
 const HERO_FULL_SIZE_CHARS = 13;
 
 type Connection = "idle" | "connecting" | "live" | "lost";
-type Action = "start" | "stop" | "restart";
+type Action = "start" | "stop" | "restart" | "pause" | "resume" | "skip";
 type FarmError = { title: string; message: string };
 
 interface Status {
@@ -45,6 +56,7 @@ function deriveStatus(summary: FarmSummary, session: Session, connection: Connec
   if (session.token_rejected) return { label: "Token rejected", tone: "danger" };
   if (session.captcha) return { label: "Captcha", tone: "danger" };
   if (session.flow_picker) return { label: "Waiting on a choice", tone: "warn" };
+  if (session.paused) return { label: "Paused", tone: "warn", detail: "Resume to carry on" };
   if (session.gateway_down) return { label: "Reconnecting", tone: "warn", detail: "Lost the Discord gateway" };
   if (session.break_until > serverNow) {
     return { label: "On break", tone: "warn", detail: `Back in ${fmtCountdown(session.break_until - serverNow)}` };
@@ -191,7 +203,8 @@ export default function Dashboard() {
       await fn();
       await refresh();
     } catch (e) {
-      setError({ title: `Couldn't ${action} the farm`, message: (e as Error).message });
+      const title = action === "skip" ? "Couldn't skip the break" : `Couldn't ${action} the farm`;
+      setError({ title, message: (e as Error).message });
     } finally {
       setBusy(null);
     }
@@ -199,6 +212,20 @@ export default function Dashboard() {
 
   const start = () => run("start", farm.start);
   const stop = () => run("stop", farm.stop);
+  const setPaused = (paused: boolean) =>
+    run(paused ? "pause" : "resume", async () => {
+      await (paused ? farm.pause() : farm.resume());
+      setSession((s) => ({ ...s, paused }));
+    });
+  const skipBreak = () =>
+    run("skip", async () => {
+      try {
+        await farm.skipBreak();
+      } catch (e) {
+        // A 409 just means the break ended first.
+        if (!(e instanceof ApiError && e.status === 409)) throw e;
+      }
+    });
   const restart = () =>
     run("restart", async () => {
       await farm.stop();
@@ -245,13 +272,39 @@ export default function Dashboard() {
       ) : (
         <div className="grid gap-4 sm:gap-5">
           <Panel className="overflow-hidden">
-            <div className="flex min-h-[60px] items-center justify-between gap-3 border-b border-border px-4 py-2.5 sm:px-5">
+            <div className="flex min-h-[60px] flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2.5 sm:px-5">
               <StatusLine status={status!} account={session.account} />
               {isRunning ? (
-                <Button variant="secondary" size="sm" loading={busy === "stop"} disabled={!!busy} onClick={stop}>
-                  {busy !== "stop" && <Square />}
-                  Stop farm
-                </Button>
+                <div className="ml-auto flex items-center gap-2">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={busy === "skip"}
+                    disabled={!!busy || session.break_until <= serverNow}
+                    onClick={skipBreak}
+                  >
+                    {busy !== "skip" && <SkipForward />}
+                    <span>
+                      Skip<span className="hidden sm:inline"> break</span>
+                    </span>
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={busy === "pause" || busy === "resume"}
+                    disabled={!!busy}
+                    onClick={() => setPaused(!session.paused)}
+                  >
+                    {busy !== "pause" && busy !== "resume" && (session.paused ? <Play /> : <Pause />)}
+                    {session.paused ? "Resume" : "Pause"}
+                  </Button>
+                  <Button variant="secondary" size="sm" loading={busy === "stop"} disabled={!!busy} onClick={stop}>
+                    {busy !== "stop" && <Square />}
+                    <span>
+                      Stop<span className="hidden sm:inline"> farm</span>
+                    </span>
+                  </Button>
+                </div>
               ) : (
                 <Button loading={busy === "start"} disabled={!!busy} onClick={start}>
                   {busy !== "start" && <Play />}

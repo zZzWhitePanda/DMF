@@ -40,6 +40,9 @@ func (h *FarmHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/farm/config", h.config)
 	mux.HandleFunc("/api/farm/start", h.start)
 	mux.HandleFunc("/api/farm/stop", h.stop)
+	mux.HandleFunc("/api/farm/pause", h.pause)
+	mux.HandleFunc("/api/farm/resume", h.resume)
+	mux.HandleFunc("/api/farm/skip-break", h.skipBreak)
 	mux.HandleFunc("/api/farm/flow-choice", h.flowChoice)
 }
 
@@ -189,6 +192,53 @@ func (h *FarmHandlers) stop(w http.ResponseWriter, r *http.Request) {
 	h.manager.Stop(acc.ID)
 	_ = h.db.SetAccountRunning(r.Context(), acc.ID, false)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
+}
+
+func (h *FarmHandlers) pause(w http.ResponseWriter, r *http.Request) {
+	if bus := h.runningBus(w, r); bus != nil {
+		bus.RequestPause(true)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "paused"})
+	}
+}
+
+func (h *FarmHandlers) resume(w http.ResponseWriter, r *http.Request) {
+	if bus := h.runningBus(w, r); bus != nil {
+		bus.RequestPause(false)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "running"})
+	}
+}
+
+// skipBreak ends the current humanized break. 409 means no break is running.
+func (h *FarmHandlers) skipBreak(w http.ResponseWriter, r *http.Request) {
+	bus := h.runningBus(w, r)
+	if bus == nil {
+		return
+	}
+	if !bus.SkipBreak() {
+		writeError(w, http.StatusConflict, "no break is running")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "skipped"})
+}
+
+// runningBus returns the bus of the caller's running farm. If there isn't one
+// it writes the error and returns nil.
+func (h *FarmHandlers) runningBus(w http.ResponseWriter, r *http.Request) *events.Bus {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return nil
+	}
+	user := auth.UserFromContext(r.Context())
+	acc, err := h.getOrCreate(r, user)
+	if err != nil || acc == nil {
+		writeError(w, http.StatusInternalServerError, "farm lookup failed")
+		return nil
+	}
+	bus := h.manager.Bus(acc.ID)
+	if bus == nil {
+		writeError(w, http.StatusBadRequest, "farm not running")
+	}
+	return bus
 }
 
 // flowChoice answers the flow picker the grinder is blocked on. 409 means

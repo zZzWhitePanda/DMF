@@ -652,6 +652,7 @@ func (i *Instance) Run(ctx context.Context) {
 				} else {
 					i.State.Resume()
 					i.Bus.Send(events.Event{Kind: events.Info, Message: "grinder resumed"})
+					i.pickUpAfterPause(ctx)
 				}
 			}
 		}
@@ -909,6 +910,7 @@ func (i *Instance) runBreakScheduler(ctx context.Context) {
 		}
 
 		kindLabel := kind.String() // "short" or "big"
+		i.Bus.ClearBreakSkip()
 		i.State.PauseBreak()
 		i.Bus.Send(events.Event{
 			Kind:    events.BreakStart,
@@ -917,11 +919,14 @@ func (i *Instance) runBreakScheduler(ctx context.Context) {
 			Message: fmt.Sprintf("%s break: pausing %s", kindLabel, humanize.FormatDuration(breakDur)),
 		})
 
+		ended := fmt.Sprintf("%s break ended (%s), back to grinding", kindLabel, humanize.FormatDuration(breakDur))
 		select {
 		case <-ctx.Done():
 			i.State.ResumeBreak()
 			return
 		case <-time.After(breakDur):
+		case <-i.Bus.BreakSkips():
+			ended = fmt.Sprintf("%s break skipped, back to grinding", kindLabel)
 		}
 
 		i.State.ResumeBreak()
@@ -930,8 +935,18 @@ func (i *Instance) runBreakScheduler(ctx context.Context) {
 			Kind:    events.BreakEnd,
 			Reward:  int(breakDur.Seconds()),
 			Outcome: kindLabel,
-			Message: fmt.Sprintf("%s break ended (%s), back to grinding", kindLabel, humanize.FormatDuration(breakDur)),
+			Message: ended,
 		})
+		i.pickUpAfterPause(ctx)
+	}
+}
+
+// pickUpAfterPause restarts a long-running command after a pause or break.
+// Fish and Flow ignore messages while paused, so nothing would click their
+// next button until the stuck detector noticed, minutes later.
+func (i *Instance) pickUpAfterPause(ctx context.Context) {
+	if !i.State.IsPaused() {
+		i.resyncFromChannel(ctx)
 	}
 }
 

@@ -435,3 +435,52 @@ func TestSessionShowsAnOpenPicker(t *testing.T) {
 		t.Fatal("answered picker still in session")
 	}
 }
+
+func TestPauseShowsInTheSession(t *testing.T) {
+	b := NewBus(8)
+	b.RequestPause(true)
+	if !b.Session().Paused || !<-b.PauseSignals() {
+		t.Fatal("pause not recorded and signalled")
+	}
+	b.RequestPause(false)
+	if b.Session().Paused || <-b.PauseSignals() {
+		t.Fatal("resume not recorded and signalled")
+	}
+}
+
+func TestSkipBreakOnlyWorksDuringABreak(t *testing.T) {
+	b := NewBus(8)
+	if b.SkipBreak() {
+		t.Fatal("skipped with no break running")
+	}
+	b.Send(Event{Kind: BreakStart, Reward: 300})
+	if !b.SkipBreak() || !b.SkipBreak() {
+		t.Fatal("skip refused during a break")
+	}
+	select {
+	case <-b.BreakSkips():
+	default:
+		t.Fatal("skip was not signalled")
+	}
+	select {
+	case <-b.BreakSkips():
+		t.Fatal("a double click signalled twice")
+	default:
+	}
+	b.Send(Event{Kind: BreakEnd})
+	if b.SkipBreak() {
+		t.Fatal("skipped after the break ended")
+	}
+}
+
+func TestLeftoverSkipIsCleared(t *testing.T) {
+	b := NewBus(8)
+	b.Send(Event{Kind: BreakStart, Reward: 300})
+	b.SkipBreak()
+	b.ClearBreakSkip()
+	select {
+	case <-b.BreakSkips():
+		t.Fatal("a leftover skip would end the next break")
+	default:
+	}
+}

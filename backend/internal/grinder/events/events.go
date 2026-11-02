@@ -82,6 +82,7 @@ type Session struct {
 	Activity      string      `json:"activity"`
 	Account       string      `json:"account"`
 	BreakUntil    int64       `json:"break_until"` // 0 unless on a break
+	Paused        bool        `json:"paused"`      // paused from the dashboard
 	OffShift      bool        `json:"off_shift"`
 	Captcha       bool        `json:"captcha"`
 	GatewayDown   bool        `json:"gateway_down"`
@@ -119,7 +120,8 @@ var (
 type Bus struct {
 	buf         int
 	flowAnswer  chan int
-	pauseSignal chan bool // TUI → instances; true = pause, false = resume
+	pauseSignal chan bool // dashboard → instances; true = pause, false = resume
+	skipBreak   chan struct{}
 
 	subMu   sync.Mutex // guards everything down to recent
 	subs    map[chan Event]struct{}
@@ -141,6 +143,7 @@ func NewBus(buf int) *Bus {
 		buf:         buf,
 		flowAnswer:  make(chan int, 1),
 		pauseSignal: make(chan bool, 8),
+		skipBreak:   make(chan struct{}, 1),
 		subs:        make(map[chan Event]struct{}),
 		session:     Session{StartedAt: time.Now().Unix(), Items: map[string]int{}},
 	}
@@ -159,8 +162,49 @@ func (b *Bus) RequestPause(pause bool) {
 	if b == nil {
 		return
 	}
+	b.subMu.Lock()
+	b.session.Paused = pause
+	b.subMu.Unlock()
 	select {
 	case b.pauseSignal <- pause:
+	default:
+	}
+}
+
+// SkipBreak asks the grinder to end the current break. It reports false if
+// there isn't one running.
+func (b *Bus) SkipBreak() bool {
+	if b == nil {
+		return false
+	}
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	if b.session.BreakUntil <= time.Now().Unix() {
+		return false
+	}
+	select {
+	case b.skipBreak <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// BreakSkips fires when a skip is requested for the current break.
+func (b *Bus) BreakSkips() <-chan struct{} {
+	if b == nil {
+		return nil
+	}
+	return b.skipBreak
+}
+
+// ClearBreakSkip drops a leftover skip, such as a double click, so it can't
+// end the next break the moment it starts.
+func (b *Bus) ClearBreakSkip() {
+	if b == nil {
+		return
+	}
+	select {
+	case <-b.skipBreak:
 	default:
 	}
 }

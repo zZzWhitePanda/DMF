@@ -149,6 +149,7 @@ export interface FarmSession {
   activity: string;
   account: string;
   break_until: number; // 0 unless on a break
+  paused: boolean;
   off_shift: boolean;
   captcha: boolean;
   gateway_down: boolean;
@@ -184,6 +185,10 @@ export const farm = {
     }),
   start: () => request<{ status: string }>("/api/farm/start", { method: "POST" }),
   stop: () => request<{ status: string }>("/api/farm/stop", { method: "POST" }),
+  pause: () => request<{ status: string }>("/api/farm/pause", { method: "POST" }),
+  resume: () => request<{ status: string }>("/api/farm/resume", { method: "POST" }),
+  /** Ends the current break. A 409 means no break is running any more. */
+  skipBreak: () => request<{ status: string }>("/api/farm/skip-break", { method: "POST" }),
   /** Answers the flow picker. -1 cancels. A 409 means nothing is waiting any more. */
   answerFlow: (index: number) =>
     request<{ ok: true }>("/api/farm/flow-choice", {

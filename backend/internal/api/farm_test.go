@@ -397,3 +397,29 @@ func TestSummaryKeepsTheLastRunUntilTheNextStarts(t *testing.T) {
 		t.Fatalf("new run kept old totals: %+v", got)
 	}
 }
+
+func TestPauseResumeAndSkipBreak(t *testing.T) {
+	s := newFarmServer(t)
+	for _, path := range []string{"/api/farm/pause", "/api/farm/resume", "/api/farm/skip-break"} {
+		if w := s.do("licensed", http.MethodPost, path, ""); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s on a stopped farm: %d", path, w.Code)
+		}
+	}
+	bus := s.start()
+	if w := s.do("licensed", http.MethodPost, "/api/farm/pause", ""); w.Code != http.StatusOK || !bus.Session().Paused {
+		t.Fatalf("pause: %d %s", w.Code, w.Body)
+	}
+	if w := s.do("licensed", http.MethodPost, "/api/farm/resume", ""); w.Code != http.StatusOK || bus.Session().Paused {
+		t.Fatalf("resume: %d %s", w.Code, w.Body)
+	}
+	if w := s.do("licensed", http.MethodPost, "/api/farm/skip-break", ""); w.Code != http.StatusConflict {
+		t.Fatalf("skip with no break: %d", w.Code)
+	}
+	bus.Send(events.Event{Kind: events.BreakStart, Reward: 300})
+	if w := s.do("licensed", http.MethodPost, "/api/farm/skip-break", ""); w.Code != http.StatusOK {
+		t.Fatalf("skip: %d %s", w.Code, w.Body)
+	}
+	if w := s.do("licensed", http.MethodGet, "/api/farm/pause", ""); w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET pause: %d", w.Code)
+	}
+}

@@ -21,6 +21,7 @@ export function freshSession(): Session {
     activity: "",
     account: "",
     break_until: 0,
+    paused: false,
     off_shift: false,
     captcha: false,
     gateway_down: false,
