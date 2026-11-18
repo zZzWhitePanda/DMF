@@ -22,6 +22,31 @@ type State struct {
 	// the only concern — old events aren't needed once a few hundred
 	// messages have gone by.
 	handledRandomEvents map[string]bool
+
+	// counted maps a message ID to the text its rewards were last counted
+	// from. Gateway updates and channel resyncs deliver the same message
+	// again and again, and each one used to add its coins again. Dank Memer
+	// edits one message through every step of /flow, so new wording on the
+	// same ID is a new reward. Bounded like handledRandomEvents.
+	counted map[string]uint64
+}
+
+// FirstCount reports whether msgID, with text fingerprint sum, hasn't had
+// its rewards counted yet, and marks it counted. An empty ID always counts.
+func (s *State) FirstCount(msgID string, sum uint64) bool {
+	if msgID == "" {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counted == nil || len(s.counted) >= 500 {
+		s.counted = make(map[string]uint64)
+	}
+	if prev, ok := s.counted[msgID]; ok && prev == sum {
+		return false
+	}
+	s.counted[msgID] = sum
+	return true
 }
 
 // NewState constructs an empty state.

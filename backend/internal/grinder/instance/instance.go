@@ -908,6 +908,11 @@ func (i *Instance) resyncFromChannel(ctx context.Context) {
 		if m.Author.ID != discord.DankMemerAppID && m.ApplicationID != discord.DankMemerAppID {
 			continue
 		}
+		// Replies to /use and to commands typed by hand would use up the
+		// three replays and push the running command's message out of reach.
+		if i.foreignCommand(&m) {
+			continue
+		}
 		data, err := json.Marshal(m)
 		if err != nil {
 			continue
@@ -1142,16 +1147,23 @@ func (i *Instance) onMessage(data json.RawMessage) {
 	// pause OR humanized break).
 	sellConf := isSellConfirmation(&m)
 
-	if !paused {
-		if n, ok := parser.ExtractReward(&m); ok && !sellConf {
-			i.State.AddBalance(n)
-			if cmd != nil {
-				i.Bus.Send(events.Event{Kind: events.CmdSuccess, Command: cmd.Name(), Reward: n})
+	// Only replies to the farm's own commands count, each wording once: see
+	// earnsFrom and State.FirstCount. Before this, a resync every few minutes
+	// re-read whatever Dank Memer had posted lately, so a prestige cost or a
+	// balance from a command typed by hand was added to the total each time.
+	if !paused && !sellConf && i.earnsFrom(&m) {
+		n, hasReward := parser.ExtractReward(&m)
+		items, hasItems := parser.ExtractItems(&m)
+		if (hasReward || hasItems) && i.State.FirstCount(m.ID, rewardTextSum(&m)) {
+			if hasReward {
+				i.State.AddBalance(n)
+				if cmd != nil {
+					i.Bus.Send(events.Event{Kind: events.CmdSuccess, Command: cmd.Name(), Reward: n})
+				}
 			}
-		}
-
-		if items, ok := parser.ExtractItems(&m); ok && !sellConf {
-			i.Bus.Send(events.Event{Kind: events.Item, Items: items})
+			if hasItems {
+				i.Bus.Send(events.Event{Kind: events.Item, Items: items})
+			}
 		}
 	}
 
