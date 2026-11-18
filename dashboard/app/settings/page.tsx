@@ -1,15 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
-import { Check, Fish, Layers, TriangleAlert, Waypoints } from "lucide-react";
+import { Check, Fish, Layers, Plus, Trash2, TriangleAlert, Waypoints } from "lucide-react";
 import { farm } from "@/lib/api";
-import { COMMAND_TOGGLES, Cluster, GrinderConfig, RANDOM_EVENT_HANDLERS } from "@/lib/config";
+import { AutoUseItem, COMMAND_TOGGLES, Cluster, GrinderConfig, RANDOM_EVENT_HANDLERS } from "@/lib/config";
 import { useUser } from "@/lib/use-user";
 import { cn } from "@/lib/utils";
 import { AppShell } from "@/components/app-shell";
 import {
   Button,
+  INPUT_STYLES,
   Panel,
   PanelHeader,
   Segmented,
@@ -23,6 +24,7 @@ const SECTIONS = [
   { id: "discord", label: "Discord" },
   { id: "commands", label: "Commands" },
   { id: "breaks", label: "Breaks" },
+  { id: "items", label: "Items" },
   { id: "events", label: "Random events" },
   { id: "alerts", label: "Captcha alerts" },
 ];
@@ -57,6 +59,8 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set by a save blocked on bad items, so rows nobody touched show why.
+  const [showItemErrors, setShowItemErrors] = useState(false);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -104,6 +108,13 @@ export default function Settings() {
 
   async function save() {
     if (!cfg) return;
+    const items = cfg.features?.auto_use?.items ?? [];
+    if (items.some((_, i) => Object.values(itemErrors(items, i)).some(Boolean))) {
+      setShowItemErrors(true);
+      setError("Fix the items marked in red.");
+      document.getElementById("items")?.scrollIntoView();
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -211,6 +222,26 @@ export default function Settings() {
                     </div>
                   </SettingsSection>
 
+                  <SettingsSection
+                    id="items"
+                    title="Items"
+                    description="Keep items like a Lucky Horseshoe going with /use."
+                  >
+                    <div className="border-b border-border px-4 py-2 sm:px-5">
+                      <ToggleRow
+                        label="Use items"
+                        description="Uses each one before the farm starts, then again on its timer."
+                        checked={!!cfg.features?.auto_use?.enabled}
+                        onChange={(v) => updateFeatures((f) => ((f.auto_use ??= {}).enabled = v))}
+                      />
+                    </div>
+                    <AutoUseList
+                      items={cfg.features?.auto_use?.items ?? []}
+                      showErrors={showItemErrors}
+                      onChange={(fn) => updateFeatures((f) => fn(((f.auto_use ??= {}).items ??= [])))}
+                    />
+                  </SettingsSection>
+
                   <SettingsSection id="events" title="Random events">
                     <div className="border-b border-border px-4 py-2 sm:px-5">
                       <ToggleRow
@@ -285,6 +316,7 @@ export default function Settings() {
                   onDiscard={() => {
                     setCfg(saved);
                     setError(null);
+                    setShowItemErrors(false);
                   }}
                 />
               </div>
@@ -392,6 +424,215 @@ function CommandSettings({
         </div>
       )}
     </div>
+  );
+}
+
+// Mirrors config.MinAutoUseEvery on the server.
+const MIN_EVERY_MINUTES = 1;
+const ROW_GRID = "grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.75rem] sm:grid-cols-[minmax(0,1fr)_8rem_8rem_2.25rem]";
+
+/** Minutes in a Go duration such as "15m", "1h30m0s" or "90s". Blank if it isn't one. */
+function durationMinutes(d: string | undefined): string {
+  if (!d) return "";
+  const parts = [...d.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s)/g)];
+  if (parts.length === 0 || parts.map((p) => p[0]).join("") !== d) return "";
+  const unit: Record<string, number> = { h: 60, m: 1, s: 1 / 60, ms: 1 / 60000 };
+  const mins = parts.reduce((sum, [, n, u]) => sum + Number(n) * unit[u], 0);
+  return String(Math.round(mins * 100) / 100);
+}
+
+/** Whole numbers only, without leading zeros. */
+const digits = (v: string) => v.replace(/\D/g, "").replace(/^0+/, "");
+
+function itemErrors(items: AutoUseItem[], i: number) {
+  const name = items[i].name.trim().toLowerCase();
+  const every = Number(durationMinutes(items[i].every));
+  return {
+    name: !name
+      ? "Enter the item's name."
+      : items.some((o, j) => j < i && o.name.trim().toLowerCase() === name)
+        ? "Already in the list."
+        : null,
+    every: !(every >= MIN_EVERY_MINUTES) ? `At least ${MIN_EVERY_MINUTES} minute.` : null,
+  };
+}
+
+function AutoUseList({
+  items,
+  showErrors,
+  onChange,
+}: {
+  items: AutoUseItem[];
+  showErrors: boolean;
+  onChange: (fn: (items: AutoUseItem[]) => void) => void;
+}) {
+  // Keys that survive deleting a row above, so no row inherits its
+  // neighbour's errors. Rows from a load or Discard fall back to their index.
+  const nextKey = useRef(0);
+  const [keys, setKeys] = useState<number[]>([]);
+  const rowKeys = items.map((_, i) => keys[i] ?? -(i + 1));
+
+  const add = () => {
+    setKeys([...rowKeys, nextKey.current++]);
+    onChange((list) => list.push({ name: "", every: "15m" }));
+  };
+  const remove = (i: number) => {
+    setKeys(rowKeys.filter((_, j) => j !== i));
+    onChange((list) => list.splice(i, 1));
+  };
+
+  return (
+    <div className="grid gap-3 p-4 sm:p-5">
+      {items.length > 0 && (
+        <div className="grid gap-2">
+          <div aria-hidden className={cn(ROW_GRID, "hidden gap-x-2 text-[13px] text-fg-muted sm:grid")}>
+            <span>Item</span>
+            <span>Every</span>
+            <span>Stop after</span>
+          </div>
+          <ul className="grid gap-4 sm:gap-2">
+            {items.map((item, i) => (
+              <AutoUseRow
+                key={rowKeys[i]}
+                index={i}
+                item={item}
+                errors={itemErrors(items, i)}
+                showErrors={showErrors}
+                onChange={(fn) => onChange((list) => fn(list[i]))}
+                onRemove={() => remove(i)}
+              />
+            ))}
+          </ul>
+        </div>
+      )}
+      <div>
+        <Button variant="secondary" size="sm" onClick={add}>
+          <Plus />
+          Add item
+        </Button>
+      </div>
+      <p className="text-[13px] text-fg-muted">
+        Type the name as you would after <span className="font-mono">/use item:</span>. When an item reaches its limit
+        or runs out, the farm stops using it until you press Continue on the Farm page, and keeps grinding meanwhile.
+      </p>
+    </div>
+  );
+}
+
+function AutoUseRow({
+  index,
+  item,
+  errors,
+  showErrors,
+  onChange,
+  onRemove,
+}: {
+  index: number;
+  item: AutoUseItem;
+  errors: { name: string | null; every: string | null };
+  showErrors: boolean;
+  onChange: (fn: (item: AutoUseItem) => void) => void;
+  onRemove: () => void;
+}) {
+  const id = `auto-use-${index}`;
+  const [touched, setTouched] = useState({ name: false, every: false });
+  const nameError = touched.name || showErrors ? errors.name : null;
+  const everyError = touched.every || showErrors ? errors.every : null;
+  // Phone labels sit above each input; wider screens share one header row.
+  const labelClass = "mb-1.5 block text-[13px] leading-5 text-fg-muted sm:sr-only";
+  const suffixClass = "pointer-events-none absolute inset-y-0 right-3 flex items-center text-[13px] text-fg-subtle";
+
+  return (
+    <li className={cn(ROW_GRID, "gap-x-2 gap-y-3 border-b border-border pb-4 last:border-0 last:pb-0 sm:border-0 sm:pb-0")}>
+      <div className="col-span-2 min-w-0 sm:col-span-1">
+        <label htmlFor={`${id}-name`} className={labelClass}>
+          Item {index + 1}
+        </label>
+        <input
+          id={`${id}-name`}
+          value={item.name}
+          placeholder="Item name"
+          autoComplete="off"
+          spellCheck={false}
+          aria-invalid={nameError ? true : undefined}
+          aria-describedby={nameError ? `${id}-name-error` : undefined}
+          onChange={(e) => onChange((it) => (it.name = e.target.value))}
+          onBlur={() => setTouched((t) => ({ ...t, name: true }))}
+          className={INPUT_STYLES}
+        />
+        {nameError && (
+          <p id={`${id}-name-error`} className="mt-1.5 text-[13px] text-danger">
+            {nameError}
+          </p>
+        )}
+      </div>
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-label={`Remove ${item.name.trim() || `item ${index + 1}`}`}
+        title="Remove"
+        onClick={onRemove}
+        className="col-start-3 row-start-1 mt-[26px] h-11 w-11 px-0 sm:col-start-4 sm:mt-0 sm:h-9 sm:w-9"
+      >
+        <Trash2 />
+      </Button>
+      <div className="min-w-0">
+        <label htmlFor={`${id}-every`} className={labelClass}>
+          Every
+        </label>
+        <div className="relative">
+          <input
+            id={`${id}-every`}
+            inputMode="numeric"
+            value={durationMinutes(item.every)}
+            autoComplete="off"
+            aria-invalid={everyError ? true : undefined}
+            aria-describedby={everyError ? `${id}-every-error` : undefined}
+            onChange={(e) => {
+              const n = digits(e.target.value);
+              onChange((it) => (it.every = n ? `${n}m` : ""));
+            }}
+            onBlur={() => setTouched((t) => ({ ...t, every: true }))}
+            className={cn(INPUT_STYLES, "pr-12 tabular-nums")}
+          />
+          <span aria-hidden className={suffixClass}>
+            min
+          </span>
+        </div>
+        {everyError && (
+          <p id={`${id}-every-error`} className="mt-1.5 text-[13px] text-danger">
+            {everyError}
+          </p>
+        )}
+      </div>
+      <div className="min-w-0">
+        <label htmlFor={`${id}-limit`} className={labelClass}>
+          Stop after
+        </label>
+        <div className="relative">
+          <input
+            id={`${id}-limit`}
+            inputMode="numeric"
+            value={item.limit ? String(item.limit) : ""}
+            placeholder="No limit"
+            autoComplete="off"
+            onChange={(e) => {
+              const n = Number(digits(e.target.value));
+              onChange((it) => {
+                if (n > 0) it.limit = n;
+                else delete it.limit;
+              });
+            }}
+            className={cn(INPUT_STYLES, "tabular-nums", !!item.limit && "pr-14")}
+          />
+          {!!item.limit && (
+            <span aria-hidden className={suffixClass}>
+              {item.limit === 1 ? "use" : "uses"}
+            </span>
+          )}
+        </div>
+      </div>
+    </li>
   );
 }
 

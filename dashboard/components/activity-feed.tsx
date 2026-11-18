@@ -15,6 +15,8 @@ import {
   Moon,
   OctagonAlert,
   Package,
+  PackageOpen,
+  PackageX,
   Play,
   PlugZap,
   ShieldAlert,
@@ -79,6 +81,10 @@ function describe(ev: GrinderEvent): Line {
         title: "Flow is waiting for a choice",
         detail: ev.choices?.join(", "),
       };
+    case "item_used":
+      return { icon: PackageOpen, tone: "neutral", group: "system", title: `Used ${ev.command}`, detail: ev.message };
+    case "item_held":
+      return { icon: PackageX, tone: "warn", group: "issues", title: ev.message };
     case "break_start":
       return { icon: Coffee, tone: "neutral", group: "system", title: ev.message };
     case "break_end":

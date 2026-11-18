@@ -484,3 +484,59 @@ func TestLeftoverSkipIsCleared(t *testing.T) {
 	default:
 	}
 }
+
+func TestAutoUseStateRidesOnEvents(t *testing.T) {
+	b := NewBus(8)
+	feed, cancel := b.Subscribe()
+	defer cancel()
+
+	list := []AutoUseStatus{{Name: "Lucky Horseshoe", Every: 900, Used: 1, Limit: 5, Left: 227, NextAt: 1}}
+	b.Send(Event{Kind: ItemUsed, Command: "Lucky Horseshoe", AutoUse: list})
+	ev := <-feed
+	if got := ev.Session.AutoUse; len(got) != 1 || got[0].Used != 1 {
+		t.Fatalf("event session auto_use = %+v, want the list just sent", got)
+	}
+
+	// An event without a list leaves the last one in place.
+	b.Send(Event{Kind: Info, Message: "unrelated"})
+	if got := (<-feed).Session.AutoUse; len(got) != 1 {
+		t.Fatalf("auto_use after an unrelated event = %+v, want it kept", got)
+	}
+	if got := b.Session().AutoUse; len(got) != 1 || got[0].Name != "Lucky Horseshoe" {
+		t.Fatalf("Session().AutoUse = %+v", got)
+	}
+}
+
+func TestContinueAutoUse(t *testing.T) {
+	b := NewBus(8)
+	if b.ContinueAutoUse("Lucky Horseshoe") {
+		t.Fatal("continued with no list at all")
+	}
+	b.Send(Event{Kind: Info, AutoUse: []AutoUseStatus{
+		{Name: "Lucky Horseshoe", Held: HeldLimit},
+		{Name: "Pizza"},
+	}})
+
+	if b.ContinueAutoUse("Pizza") {
+		t.Error("continued an item that isn't held")
+	}
+	if b.ContinueAutoUse("Apple") {
+		t.Error("continued an item that isn't in the list")
+	}
+	if !b.ContinueAutoUse("lucky horseshoe") {
+		t.Fatal("couldn't continue a held item by its name in another case")
+	}
+	select {
+	case name := <-b.AutoUseContinues():
+		if name != "Lucky Horseshoe" {
+			t.Errorf("signal named %q, want the item's own name", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no continue signal")
+	}
+
+	b.Close()
+	if b.ContinueAutoUse("Lucky Horseshoe") {
+		t.Error("continued on a closed bus")
+	}
+}

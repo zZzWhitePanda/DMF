@@ -48,11 +48,24 @@ export interface Features {
   commands?: Record<string, boolean>;
   fishing?: FishingConfig;
   breaks?: { enabled?: boolean };
+  auto_use?: AutoUseConfig;
   random_events?: boolean;
   random_event_role_id?: string;
   random_event_handlers?: Record<string, boolean>;
   auto_buy?: Record<string, boolean>;
   proxies?: string[];
+}
+
+/** Items the farm keeps using with /use. See config.AutoUseConfig. */
+export interface AutoUseConfig {
+  enabled?: boolean;
+  items?: AutoUseItem[];
+}
+
+export interface AutoUseItem {
+  name: string;
+  every: string; // a Go duration, such as "15m"
+  limit?: number; // stop after this many until Continue, 0 or missing for no limit
 }
 
 export interface FishingConfig {

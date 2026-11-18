@@ -66,6 +66,10 @@ type Instance struct {
 	// detector uses this to decide when to resync.
 	activityMu   sync.Mutex
 	lastActivity time.Time
+
+	// Items to keep using with /use. Nil unless turned on, and only the
+	// master uses items: the dashboard shows one account's list.
+	autoUse *autoUser
 }
 
 func (i *Instance) markActivity() {
@@ -113,6 +117,10 @@ func New(cfg *config.Config, cl *config.Cluster, inst *config.Instance, isMaster
 		return nil, err
 	}
 	gw := discord.NewGateway(inst.Token, proxy, logger)
+	var autoUse *autoUser
+	if isMaster {
+		autoUse = newAutoUser(cfg.Features.AutoUse, time.Now())
+	}
 	return &Instance{
 		Name:      inst.Name,
 		Token:     inst.Token,
@@ -127,6 +135,7 @@ func New(cfg *config.Config, cl *config.Cluster, inst *config.Instance, isMaster
 		Bus:       bus,
 		State:     NewState(),
 		Log:       logger,
+		autoUse:   autoUse,
 	}, nil
 }
 
@@ -632,6 +641,10 @@ func (i *Instance) Run(ctx context.Context) {
 	// gateway events (reconnect race, DM glitch, etc.).
 	go i.runStuckDetector(ctx)
 
+	// Continue on the dashboard starts a held auto-use item again.
+	go i.listenForContinue(ctx)
+	i.announceAutoUse()
+
 	// Subscribe to TUI pause/resume signals so dashboard q/esc can
 	// toggle grinder activity without exiting the whole session.
 	go func() {
@@ -741,6 +754,13 @@ func (i *Instance) loop(ctx context.Context) {
 				return
 			case <-time.After(5 * time.Second):
 			}
+			continue
+		}
+
+		// Items come before commands, so on a fresh start every item is used
+		// before the first command runs. One per pass, so a pause or break
+		// that starts in between is honoured.
+		if i.useDueItem(ctx) {
 			continue
 		}
 
@@ -1084,6 +1104,14 @@ func (i *Instance) onMessage(data json.RawMessage) {
 
 	// Scope to interactions we initiated.
 	if m.Interaction != nil && i.SelfUserID != "" && m.Interaction.User.ID != i.SelfUserID {
+		return
+	}
+
+	// Replies to our /use go to auto-use alone. They'd otherwise reach the
+	// running command, and "You have 228 Lucky Horseshoe left" reads as items
+	// earned.
+	if i.autoUse != nil && m.Interaction != nil && strings.EqualFold(m.Interaction.Name, "use") {
+		i.autoUse.offer(&m)
 		return
 	}
 

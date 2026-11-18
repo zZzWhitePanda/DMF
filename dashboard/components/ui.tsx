@@ -232,6 +232,13 @@ export function Segmented<T extends string>({
 // TextField — label, input, hint and on-blur validation wired together.
 // ---------------------------------------------------------------------------
 
+/** The text input look, for inputs that can't use TextField. Mark bad values with aria-invalid. */
+export const INPUT_STYLES = cn(
+  "h-11 w-full rounded-md border border-border bg-bg px-3 text-base text-fg outline-none transition-colors sm:h-9 sm:text-sm",
+  "placeholder:text-fg-subtle hover:border-border-strong focus:border-accent focus:ring-1 focus:ring-accent",
+  "aria-[invalid=true]:border-danger aria-[invalid=true]:focus:ring-danger",
+);
+
 export function TextField({
   label,
   hint,
@@ -280,9 +287,7 @@ export function TextField({
           onChange={(e) => onChange(e.target.value)}
           onBlur={() => setTouched(true)}
           className={cn(
-            "h-11 w-full rounded-md border border-border bg-bg px-3 text-base text-fg outline-none transition-colors sm:h-9 sm:text-sm",
-            "placeholder:text-fg-subtle hover:border-border-strong focus:border-accent focus:ring-1 focus:ring-accent",
-            "aria-[invalid=true]:border-danger aria-[invalid=true]:focus:ring-danger",
+            INPUT_STYLES,
             (mono || secret) && "font-mono sm:text-[13px]",
             secret && "pr-11",
           )}

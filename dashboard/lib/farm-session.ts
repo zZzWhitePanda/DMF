@@ -28,6 +28,7 @@ export function freshSession(): Session {
     discord_up: false,
     token_rejected: false,
     flow_picker: null,
+    auto_use: null,
   };
 }
 

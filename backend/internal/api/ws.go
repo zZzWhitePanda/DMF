@@ -252,6 +252,10 @@ func kindToString(k events.Kind) string {
 		return "break_start"
 	case events.BreakEnd:
 		return "break_end"
+	case events.ItemUsed:
+		return "item_used"
+	case events.ItemHeld:
+		return "item_held"
 	}
 	return "unknown"
 }

@@ -26,6 +26,7 @@ import (
 //	POST   /api/farm/start       → start grinder
 //	POST   /api/farm/stop        → stop grinder
 //	POST   /api/farm/flow-choice → answer the flow picker ({index}, -1 cancels)
+//	POST   /api/farm/auto-use/continue → start using a held item again ({name})
 type FarmHandlers struct {
 	db      *db.DB
 	manager *runtime.Manager
@@ -44,6 +45,7 @@ func (h *FarmHandlers) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/farm/resume", h.resume)
 	mux.HandleFunc("/api/farm/skip-break", h.skipBreak)
 	mux.HandleFunc("/api/farm/flow-choice", h.flowChoice)
+	mux.HandleFunc("/api/farm/auto-use/continue", h.continueAutoUse)
 }
 
 // getOrCreate returns the user's single farm account, creating a
@@ -219,6 +221,27 @@ func (h *FarmHandlers) skipBreak(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "skipped"})
+}
+
+// continueAutoUse starts using an item that hit its limit or ran out. 409
+// means that item isn't held: a second click, or another tab got there first.
+func (h *FarmHandlers) continueAutoUse(w http.ResponseWriter, r *http.Request) {
+	bus := h.runningBus(w, r)
+	if bus == nil {
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if !bus.ContinueAutoUse(body.Name) {
+		writeError(w, http.StatusConflict, "that item isn't waiting to continue")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "continued"})
 }
 
 // runningBus returns the bus of the caller's running farm. If there isn't one

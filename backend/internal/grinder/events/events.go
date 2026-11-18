@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,6 +35,8 @@ const (
 	RodBroken        // fishing rod broke (uses Message field with rod name)
 	BreakStart       // humanized break started (Reward = duration seconds)
 	BreakEnd         // humanized break ended (Reward = next session seconds)
+	ItemUsed         // auto-use used an item (Command = item, Message = progress)
+	ItemHeld         // auto-use stopped using an item until Continue (Command = item, Outcome = why)
 )
 
 // Event is one thing that happened in the grinder.
@@ -47,6 +50,10 @@ type Event struct {
 	Items    map[string]int
 	Choices  []string
 	Outcome  string
+
+	// AutoUse, when set, replaces the session's auto-use list. Senders build a
+	// new slice every time, so the session can share it.
+	AutoUse []AutoUseStatus
 
 	// ID orders a run's events. Session is the run's state right after this
 	// event. Send fills in both.
@@ -90,6 +97,9 @@ type Session struct {
 	TokenRejected bool        `json:"token_rejected"`
 	FlowPicker    *FlowPicker `json:"flow_picker"`
 
+	// AutoUse is every item the run keeps using, in settings order.
+	AutoUse []AutoUseStatus `json:"auto_use"`
+
 	// Recent is the feed so far, oldest first. Only set by Bus.Session and
 	// SubscribeSession, so per-event copies stay small.
 	Recent []Event `json:"-"`
@@ -97,6 +107,24 @@ type Session struct {
 
 // OutcomeAuthFailed marks a GatewayDown event as Discord refusing the token.
 const OutcomeAuthFailed = "auth_failed"
+
+// Why auto-use stopped using an item. Each one waits for Continue.
+const (
+	HeldLimit   = "limit"   // used as many as the user asked for
+	HeldOut     = "out"     // Dank Memer says there are none left
+	HeldUnknown = "unknown" // Dank Memer doesn't know the item name
+)
+
+// AutoUseStatus is where one auto-use item stands.
+type AutoUseStatus struct {
+	Name   string `json:"name"`
+	Every  int64  `json:"every"`   // seconds between uses
+	Used   int    `json:"used"`    // since the run started or Continue was last pressed
+	Limit  int    `json:"limit"`   // 0 for no limit
+	Left   int    `json:"left"`    // how many Dank Memer says are left, -1 if it hasn't said
+	NextAt int64  `json:"next_at"` // when it's next due, 0 while held
+	Held   string `json:"held"`    // why it's stopped, empty while in use
+}
 
 // FlowPicker is a flow choice the grinder is blocked on.
 type FlowPicker struct {
@@ -122,6 +150,7 @@ type Bus struct {
 	flowAnswer  chan int
 	pauseSignal chan bool // dashboard → instances; true = pause, false = resume
 	skipBreak   chan struct{}
+	autoUseGo   chan string // names of held auto-use items to carry on with
 
 	subMu   sync.Mutex // guards everything down to recent
 	subs    map[chan Event]struct{}
@@ -144,6 +173,7 @@ func NewBus(buf int) *Bus {
 		flowAnswer:  make(chan int, 1),
 		pauseSignal: make(chan bool, 8),
 		skipBreak:   make(chan struct{}, 1),
+		autoUseGo:   make(chan string, 16),
 		subs:        make(map[chan Event]struct{}),
 		session:     Session{StartedAt: time.Now().Unix(), Items: map[string]int{}},
 	}
@@ -209,6 +239,37 @@ func (b *Bus) ClearBreakSkip() {
 	}
 }
 
+// ContinueAutoUse asks the grinder to start using a held item again. It
+// reports false if no item by that name is held.
+func (b *Bus) ContinueAutoUse(name string) bool {
+	if b == nil {
+		return false
+	}
+	b.subMu.Lock()
+	defer b.subMu.Unlock()
+	if b.closed {
+		return false
+	}
+	for _, it := range b.session.AutoUse {
+		if strings.EqualFold(it.Name, name) && it.Held != "" {
+			select {
+			case b.autoUseGo <- it.Name:
+			default:
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// AutoUseContinues delivers the names passed to ContinueAutoUse.
+func (b *Bus) AutoUseContinues() <-chan string {
+	if b == nil {
+		return nil
+	}
+	return b.autoUseGo
+}
+
 // PauseSignals returns the receive-side of the pause/resume stream.
 func (b *Bus) PauseSignals() <-chan bool {
 	if b == nil {
@@ -265,6 +326,9 @@ func (b *Bus) isOtherCurrency(e Event) bool {
 // apply folds an event into the session. Callers hold subMu.
 func (b *Bus) apply(e Event) {
 	s := &b.session
+	if e.AutoUse != nil {
+		s.AutoUse = e.AutoUse
+	}
 	switch e.Kind {
 	case CmdSuccess, FishToken:
 		s.Earned += e.Reward

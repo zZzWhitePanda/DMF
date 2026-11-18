@@ -202,7 +202,22 @@ export interface FarmSession {
   discord_up: boolean;
   token_rejected: boolean;
   flow_picker: FlowPicker | null;
+  auto_use: AutoUseStatus[] | null; // items the run keeps using
   recent?: GrinderEvent[]; // the feed so far, oldest first
+}
+
+/** Why auto-use stopped using an item. Each waits for Continue. */
+export type AutoUseHeld = "" | "limit" | "out" | "unknown";
+
+/** Where one auto-use item stands. See events.AutoUseStatus on the server. */
+export interface AutoUseStatus {
+  name: string;
+  every: number; // seconds between uses
+  used: number; // since the run started or Continue was last pressed
+  limit: number; // 0 for no limit
+  left: number; // what Dank Memer says is left, -1 if it hasn't said
+  next_at: number; // when it's next due, 0 while held
+  held: AutoUseHeld;
 }
 
 export interface FarmSummary {
@@ -235,6 +250,12 @@ export const farm = {
   resume: () => request<{ status: string }>("/api/farm/resume", { method: "POST" }),
   /** Ends the current break. A 409 means no break is running any more. */
   skipBreak: () => request<{ status: string }>("/api/farm/skip-break", { method: "POST" }),
+  /** Starts using a held item again. A 409 means it isn't held any more. */
+  continueItem: (name: string) =>
+    request<{ status: string }>("/api/farm/auto-use/continue", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
   /** Answers the flow picker. -1 cancels. A 409 means nothing is waiting any more. */
   answerFlow: (index: number) =>
     request<{ ok: true }>("/api/farm/flow-choice", {

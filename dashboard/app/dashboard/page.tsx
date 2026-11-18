@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   KeyRound,
+  PackageCheck,
+  PackageX,
   Pause,
   Play,
   RotateCw,
@@ -13,7 +15,17 @@ import {
   TriangleAlert,
   Waypoints,
 } from "lucide-react";
-import { ApiError, Currency, FarmSession, FarmSummary, FlowPicker, GrinderEvent, connectFarmWS, farm } from "@/lib/api";
+import {
+  ApiError,
+  AutoUseStatus,
+  Currency,
+  FarmSession,
+  FarmSummary,
+  FlowPicker,
+  GrinderEvent,
+  connectFarmWS,
+  farm,
+} from "@/lib/api";
 import { Session, freshSession, isFeedEvent } from "@/lib/farm-session";
 import { useUser } from "@/lib/use-user";
 import { cn, fmtCommas, fmtCompact, fmtCountdown, fmtElapsed } from "@/lib/utils";
@@ -93,6 +105,7 @@ export default function Dashboard() {
   const [connection, setConnection] = useState<Connection>("idle");
   const [busy, setBusy] = useState<Action | null>(null);
   const [answering, setAnswering] = useState<number | null>(null);
+  const [continuing, setContinuing] = useState<string | null>(null);
   const [error, setError] = useState<FarmError | null>(null);
   // Seconds to add to this device's clock to get the server's. Breaks and the
   // run timer are server times, and a phone's clock can be well off.
@@ -251,6 +264,28 @@ export default function Dashboard() {
     }
   }
 
+  async function continueItem(name: string) {
+    setContinuing(name);
+    setError(null);
+    // The server sends the new state too; this just saves waiting for it.
+    const resumed = () =>
+      setSession((s) => ({
+        ...s,
+        auto_use: s.auto_use?.map((it) => (it.name === name ? { ...it, held: "" as const, used: 0 } : it)) ?? null,
+      }));
+    try {
+      await farm.continueItem(name);
+      resumed();
+    } catch (e) {
+      // A 409 means it isn't held any more: a second click, or another tab.
+      if (e instanceof ApiError && e.status === 409) resumed();
+      else setError({ title: `Couldn't continue ${name}`, message: (e as Error).message });
+    } finally {
+      setContinuing(null);
+    }
+  }
+
+  const heldItems = (session.auto_use ?? []).filter((it) => it.held);
   const status = summary ? deriveStatus(summary, session, connection, serverNow) : null;
 
   useEffect(() => {
@@ -363,6 +398,16 @@ export default function Dashboard() {
             {isRunning && session.flow_picker && (
               <FlowPickerBanner picker={session.flow_picker} answering={answering} onAnswer={answerFlow} />
             )}
+            {isRunning &&
+              heldItems.map((item) => (
+                <HeldItemBanner
+                  key={item.name}
+                  item={item}
+                  loading={continuing === item.name}
+                  disabled={continuing !== null}
+                  onContinue={() => continueItem(item.name)}
+                />
+              ))}
 
             <Earnings
               session={session}
@@ -371,6 +416,9 @@ export default function Dashboard() {
               running={isRunning}
               serverNow={serverNow}
             />
+            {!!session.auto_use?.length && (
+              <AutoUseList items={session.auto_use} running={isRunning} serverNow={serverNow} />
+            )}
           </Panel>
 
           <div className="grid gap-4 sm:gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
@@ -439,6 +487,97 @@ function FlowPickerBanner({
         {picker.message || "Pick a flow to start earning."}
       </span>
     </Banner>
+  );
+}
+
+function HeldItemBanner({
+  item,
+  loading,
+  disabled,
+  onContinue,
+}: {
+  item: AutoUseStatus;
+  loading: boolean;
+  disabled: boolean;
+  onContinue: () => void;
+}) {
+  const { title, body, icon } =
+    item.held === "limit"
+      ? {
+          title: `Stopped using ${item.name}`,
+          body: `Used ${fmtCommas(item.used)} of ${fmtCommas(item.limit)}. Continue to use another ${fmtCommas(item.limit)}.`,
+          icon: <PackageCheck />,
+        }
+      : item.held === "out"
+        ? {
+            title: `Out of ${item.name}`,
+            body: "Dank Memer says there are none left. Get more, then continue.",
+            icon: <PackageX />,
+          }
+        : {
+            title: `Dank Memer doesn't know "${item.name}"`,
+            body: "Fix the name in Settings and restart the farm, or try it again as it is.",
+            icon: <PackageX />,
+          };
+  return (
+    <Banner
+      tone="warn"
+      icon={icon}
+      title={title}
+      className="border-b border-border"
+      action={
+        <div className="flex gap-2">
+          {item.held === "unknown" && (
+            <a href="/settings/#items" className={buttonStyles({ variant: "ghost", size: "sm" })}>
+              Settings
+            </a>
+          )}
+          <Button variant="secondary" size="sm" loading={loading} disabled={disabled} onClick={onContinue}>
+            {!loading && <Play />}
+            {item.held === "unknown" ? "Try again" : "Continue"}
+          </Button>
+        </div>
+      }
+    >
+      {body}
+    </Banner>
+  );
+}
+
+/** Where each auto-use item stands, under the run's stats. */
+function AutoUseList({ items, running, serverNow }: { items: AutoUseStatus[]; running: boolean; serverNow: number }) {
+  return (
+    <div className="border-t border-border py-2">
+      <h2 className="px-4 py-1 text-[13px] text-fg-muted sm:px-5">Items</h2>
+      <ul>
+        {items.map((it) => {
+          const progress = it.limit > 0 ? `${fmtCommas(it.used)} of ${fmtCommas(it.limit)}` : `${fmtCommas(it.used)} used`;
+          const left = it.left >= 0 ? `${fmtCommas(it.left)} left` : null;
+          let when: string | null = null;
+          if (it.held) when = "waiting for Continue";
+          else if (running) when = it.next_at > serverNow ? `next in ${fmtCountdown(it.next_at - serverNow)}` : "due now";
+          return (
+            <li
+              key={it.name}
+              className="flex flex-wrap items-baseline justify-between gap-x-4 px-4 py-1 text-[13px] leading-5 sm:px-5"
+            >
+              <span className="min-w-0 truncate text-fg" title={it.name}>
+                {it.name}
+              </span>
+              <span className="tabular-nums text-fg-muted">
+                {[progress, left].filter(Boolean).join(" · ")}
+                {when && (
+                  <span className={cn(it.held && running && "text-warn")}>
+                    {" · "}
+                    {when}
+                  </span>
+                )}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

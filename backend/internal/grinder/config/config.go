@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -14,7 +15,10 @@ type Duration time.Duration
 // UnmarshalYAML parses either a duration string or raw nanoseconds.
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
-	if err := value.Decode(&s); err == nil && s != "" {
+	if err := value.Decode(&s); err == nil && s == "" {
+		*d = 0 // blank is unset, like a missing key
+		return nil
+	} else if err == nil {
 		parsed, err := time.ParseDuration(s)
 		if err != nil {
 			return fmt.Errorf("invalid duration %q: %w", s, err)
@@ -82,6 +86,7 @@ type Features struct {
 	CustomCommands []CustomCommand `yaml:"custom_commands"`
 	Fishing        FishingConfig   `yaml:"fishing"`
 	Breaks         BreaksConfig    `yaml:"breaks"`
+	AutoUse        AutoUseConfig   `yaml:"auto_use"`
 
 	// Proxies is a pool of proxy URLs. If non-empty, grinder picks one at
 	// random per session for both REST + Gateway traffic. Reduces captcha
@@ -127,6 +132,24 @@ type FishingConfig struct {
 type BreaksConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
+
+// AutoUseConfig runs /use on a list of items: each once before the farm's
+// first command, then again every Every.
+type AutoUseConfig struct {
+	Enabled bool          `yaml:"enabled"`
+	Items   []AutoUseItem `yaml:"items"`
+}
+
+// AutoUseItem is one item to keep using. Limit caps how many get used before
+// the farm holds off and waits for Continue on the dashboard; 0 means no cap.
+type AutoUseItem struct {
+	Name  string   `yaml:"name"`
+	Every Duration `yaml:"every"`
+	Limit int      `yaml:"limit,omitempty"`
+}
+
+// MinAutoUseEvery is the shortest gap allowed between uses of one item.
+const MinAutoUseEvery = time.Minute
 
 type AutoBuy struct {
 	FishingPole  bool `yaml:"fishing_pole"`
@@ -215,6 +238,13 @@ func (c *Config) setDefaults() {
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
 	}
+	for i := range c.Features.AutoUse.Items {
+		it := &c.Features.AutoUse.Items[i]
+		it.Name = strings.TrimSpace(it.Name)
+		if it.Every == 0 {
+			it.Every = Duration(15 * time.Minute)
+		}
+	}
 }
 
 func (c *Config) validate() error {
@@ -230,6 +260,30 @@ func (c *Config) validate() error {
 		}
 		if cl.Master.Token == "" {
 			return fmt.Errorf("cluster %d: master token required", i)
+		}
+	}
+	return c.Features.AutoUse.validate()
+}
+
+// validate checks the item list even while auto-use is off, so a list saved
+// for later can't turn out broken when it's switched on.
+func (a AutoUseConfig) validate() error {
+	seen := map[string]bool{}
+	for i, it := range a.Items {
+		n := i + 1
+		if it.Name == "" {
+			return fmt.Errorf("auto-use item %d: name required", n)
+		}
+		key := strings.ToLower(it.Name)
+		if seen[key] {
+			return fmt.Errorf("auto-use item %d: %s is already in the list", n, it.Name)
+		}
+		seen[key] = true
+		if it.Every.Std() < MinAutoUseEvery {
+			return fmt.Errorf("auto-use item %d: %s must be at least %s apart", n, it.Name, MinAutoUseEvery)
+		}
+		if it.Limit < 0 {
+			return fmt.Errorf("auto-use item %d: limit can't be negative", n)
 		}
 	}
 	return nil

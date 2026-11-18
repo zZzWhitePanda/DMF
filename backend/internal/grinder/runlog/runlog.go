@@ -121,5 +121,9 @@ func (l *Logger) WriteEvent(e events.Event) {
 		l.writef("error: %s", e.Message)
 	case events.FlowPickerNeeded:
 		l.writef("flow picker shown (%d choices)", len(e.Choices))
+	case events.ItemUsed:
+		l.writef("used %s: %s", e.Command, e.Message)
+	case events.ItemHeld:
+		l.writef("held %s (%s): %s", e.Command, e.Outcome, e.Message)
 	}
 }

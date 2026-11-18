@@ -423,3 +423,42 @@ func TestPauseResumeAndSkipBreak(t *testing.T) {
 		t.Fatalf("GET pause: %d", w.Code)
 	}
 }
+
+func TestContinueAutoUse(t *testing.T) {
+	s := newFarmServer(t)
+	const path = "/api/farm/auto-use/continue"
+	if w := s.do("licensed", http.MethodPost, path, `{"name":"Lucky Horseshoe"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("continue on a stopped farm: %d", w.Code)
+	}
+	bus := s.start()
+	bus.Send(events.Event{Kind: events.ItemHeld, AutoUse: []events.AutoUseStatus{{Name: "Lucky Horseshoe", Held: events.HeldLimit}}})
+
+	for _, body := range []string{``, `{}`, `{"name":""}`, `not json`} {
+		if w := s.do("licensed", http.MethodPost, path, body); w.Code != http.StatusBadRequest {
+			t.Errorf("body %q: %d, want 400", body, w.Code)
+		}
+	}
+	if w := s.do("licensed", http.MethodPost, path, `{"name":"Pizza"}`); w.Code != http.StatusConflict {
+		t.Errorf("an item that isn't held: %d, want 409", w.Code)
+	}
+	if w := s.do("licensed", http.MethodPost, path, `{"name":"Lucky Horseshoe"}`); w.Code != http.StatusOK {
+		t.Fatalf("continue: %d %s", w.Code, w.Body)
+	}
+	select {
+	case name := <-bus.AutoUseContinues():
+		if name != "Lucky Horseshoe" {
+			t.Errorf("signal named %q", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("continue never reached the grinder")
+	}
+	if w := s.do("licensed", http.MethodGet, path, ""); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET: %d", w.Code)
+	}
+
+	// The list reaches the dashboard in the summary.
+	w := s.do("licensed", http.MethodGet, "/api/farm", "")
+	if !strings.Contains(w.Body.String(), `"auto_use":[{"name":"Lucky Horseshoe"`) {
+		t.Errorf("summary is missing auto_use: %s", w.Body)
+	}
+}
