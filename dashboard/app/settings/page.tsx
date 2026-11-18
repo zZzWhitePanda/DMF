@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
-import { Check, Fish, Layers, Plus, Trash2, TriangleAlert, Waypoints } from "lucide-react";
+import { Check, ChevronDown, Fish, Layers, Plus, Trash2, TriangleAlert, Waypoints } from "lucide-react";
 import { farm } from "@/lib/api";
 import { AutoUseItem, COMMAND_TOGGLES, Cluster, GrinderConfig, RANDOM_EVENT_HANDLERS } from "@/lib/config";
 import { useUser } from "@/lib/use-user";
@@ -428,17 +428,35 @@ function CommandSettings({
 }
 
 // Mirrors config.MinAutoUseEvery on the server.
-const MIN_EVERY_MINUTES = 1;
-const ROW_GRID = "grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2.75rem] sm:grid-cols-[minmax(0,1fr)_8rem_8rem_2.25rem]";
+const MIN_EVERY_SECONDS = 10;
+// On phones Every gets the bigger share, since it holds a number and a unit.
+const ROW_GRID = "grid grid-cols-[minmax(0,3fr)_minmax(0,2fr)_2.75rem] sm:grid-cols-[minmax(0,1fr)_11rem_8rem_2.25rem]";
 
-/** Minutes in a Go duration such as "15m", "1h30m0s" or "90s". Blank if it isn't one. */
-function durationMinutes(d: string | undefined): string {
-  if (!d) return "";
-  const parts = [...d.matchAll(/(\d+(?:\.\d+)?)(h|ms|m|s)/g)];
-  if (parts.length === 0 || parts.map((p) => p[0]).join("") !== d) return "";
-  const unit: Record<string, number> = { h: 60, m: 1, s: 1 / 60, ms: 1 / 60000 };
-  const mins = parts.reduce((sum, [, n, u]) => sum + Number(n) * unit[u], 0);
-  return String(Math.round(mins * 100) / 100);
+type EveryUnit = "s" | "m" | "h" | "d";
+const UNITS: { value: EveryUnit; label: string; seconds: number }[] = [
+  { value: "s", label: "sec", seconds: 1 },
+  { value: "m", label: "min", seconds: 60 },
+  { value: "h", label: "hr", seconds: 3600 },
+  { value: "d", label: "days", seconds: 86400 },
+];
+
+/** Seconds in a duration as the server reads it ("15m", "1h30m0s", "2d"). NaN if it isn't one. */
+function durationSeconds(d: string): number {
+  const parts = [...d.matchAll(/(\d+(?:\.\d+)?)(d|h|ms|m|s)/g)];
+  if (!d || parts.map((p) => p[0]).join("") !== d) return NaN;
+  const secs: Record<string, number> = { d: 86400, h: 3600, m: 60, s: 1, ms: 0.001 };
+  return parts.reduce((sum, [, n, u]) => sum + Number(n) * secs[u], 0);
+}
+
+/** An item's gap as a number and unit to show. The number is blank while unset. */
+function splitEvery(d: string | undefined): { n: string; unit: EveryUnit } {
+  const plain = d?.match(/^(\d+)([smhd])$/);
+  if (plain) return { n: plain[1] === "0" ? "" : plain[1], unit: plain[2] as EveryUnit };
+  const secs = durationSeconds(d ?? "");
+  if (!(secs > 0)) return { n: "", unit: "m" };
+  // Written some other way, like "1h30m0s": the biggest unit that fits evenly.
+  const unit = [...UNITS].reverse().find((u) => secs % u.seconds === 0) ?? UNITS[0];
+  return { n: String(Math.round((secs / unit.seconds) * 100) / 100), unit: unit.value };
 }
 
 /** Whole numbers only, without leading zeros. */
@@ -446,14 +464,18 @@ const digits = (v: string) => v.replace(/\D/g, "").replace(/^0+/, "");
 
 function itemErrors(items: AutoUseItem[], i: number) {
   const name = items[i].name.trim().toLowerCase();
-  const every = Number(durationMinutes(items[i].every));
+  const every = durationSeconds(items[i].every ?? "");
   return {
     name: !name
       ? "Enter the item's name."
       : items.some((o, j) => j < i && o.name.trim().toLowerCase() === name)
         ? "Already in the list."
         : null,
-    every: !(every >= MIN_EVERY_MINUTES) ? `At least ${MIN_EVERY_MINUTES} minute.` : null,
+    every: !(every > 0)
+      ? "Enter how often."
+      : every < MIN_EVERY_SECONDS
+        ? `At least ${MIN_EVERY_SECONDS} seconds.`
+        : null,
   };
 }
 
@@ -536,6 +558,7 @@ function AutoUseRow({
 }) {
   const id = `auto-use-${index}`;
   const [touched, setTouched] = useState({ name: false, every: false });
+  const every = splitEvery(item.every);
   const nameError = touched.name || showErrors ? errors.name : null;
   const everyError = touched.every || showErrors ? errors.every : null;
   // Phone labels sit above each input; wider screens share one header row.
@@ -580,24 +603,43 @@ function AutoUseRow({
         <label htmlFor={`${id}-every`} className={labelClass}>
           Every
         </label>
-        <div className="relative">
+        {/* The unit stays in the saved value even while the number is blank ("0m"). */}
+        <div className="flex">
           <input
             id={`${id}-every`}
             inputMode="numeric"
-            value={durationMinutes(item.every)}
+            value={every.n}
             autoComplete="off"
             aria-invalid={everyError ? true : undefined}
             aria-describedby={everyError ? `${id}-every-error` : undefined}
             onChange={(e) => {
               const n = digits(e.target.value);
-              onChange((it) => (it.every = n ? `${n}m` : ""));
+              onChange((it) => (it.every = `${n || 0}${every.unit}`));
             }}
             onBlur={() => setTouched((t) => ({ ...t, every: true }))}
-            className={cn(INPUT_STYLES, "pr-12 tabular-nums")}
+            className={cn(INPUT_STYLES, "relative min-w-0 flex-1 rounded-r-none tabular-nums focus:z-10")}
           />
-          <span aria-hidden className={suffixClass}>
-            min
-          </span>
+          <div className="relative -ml-px shrink-0">
+            <select
+              aria-label={`Unit for ${item.name.trim() || `item ${index + 1}`}`}
+              value={every.unit}
+              onChange={(e) => onChange((it) => (it.every = `${every.n || 0}${e.target.value}`))}
+              className={cn(
+                INPUT_STYLES,
+                "relative w-auto cursor-pointer appearance-none rounded-l-none pl-2 pr-6 text-fg-muted focus:z-10",
+              )}
+            >
+              {UNITS.map((u) => (
+                <option key={u.value} value={u.value}>
+                  {u.label}
+                </option>
+              ))}
+            </select>
+            <ChevronDown
+              aria-hidden
+              className="pointer-events-none absolute right-1.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-fg-subtle"
+            />
+          </div>
         </div>
         {everyError && (
           <p id={`${id}-every-error`} className="mt-1.5 text-[13px] text-danger">

@@ -42,6 +42,7 @@ func TestClassifyUse(t *testing.T) {
 		{"none owned, curly apostrophe", &discord.Message{Content: "You don’t have any Lucky Horseshoe"}, useOut, 0},
 		{"unknown name", &discord.Message{Embeds: []discord.Embed{{Description: "Couldn't find an item called lucky horshoe"}}}, useUnknown, -1},
 		{"still active", &discord.Message{Content: "You already have a Lucky Horseshoe active!"}, useNotReady, -1},
+		{"busy with /flow", &discord.Message{Embeds: []discord.Embed{{Title: "Hold Tight!", Description: "Finish your other command first."}}}, useNotReady, -1},
 		{"thinking placeholder", &discord.Message{Flags: 128}, useUnclear, -1},
 		{"something else", &discord.Message{Content: "Pepe looks at you funny"}, useUnclear, -1},
 	}

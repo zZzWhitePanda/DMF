@@ -39,7 +39,7 @@ func TestAutoUseConfig(t *testing.T) {
 func TestAutoUseConfigRejects(t *testing.T) {
 	cases := map[string]string{
 		"blank name":     `{name: " ", every: 15m}`,
-		"too often":      `{name: Pizza, every: 30s}`,
+		"too often":      `{name: Pizza, every: 5s}`,
 		"negative limit": `{name: Pizza, every: 15m, limit: -1}`,
 	}
 	for name, item := range cases {
@@ -69,5 +69,33 @@ func TestBlankDurationIsUnset(t *testing.T) {
 	}
 	if got := cfg.Features.AutoUse.Items[0].Every.Std(); got != 15*time.Minute {
 		t.Errorf("every = %s, want the 15m default", got)
+	}
+}
+
+func TestParseDurationDays(t *testing.T) {
+	cases := map[string]time.Duration{
+		"2d":      48 * time.Hour,
+		"1d12h":   36 * time.Hour,
+		"1.5d":    36 * time.Hour,
+		"30s":     30 * time.Second,
+		"15m":     15 * time.Minute,
+		"1h30m0s": 90 * time.Minute,
+	}
+	for in, want := range cases {
+		if got, err := ParseDuration(in); err != nil || got != want {
+			t.Errorf("ParseDuration(%q) = %s, %v; want %s", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"d", "2days", "abc"} {
+		if _, err := ParseDuration(bad); err == nil {
+			t.Errorf("ParseDuration(%q) accepted junk", bad)
+		}
+	}
+	cfg, err := Parse([]byte(baseYAML + "features:\n  auto_use:\n    items: [{name: Pizza, every: 1d}, {name: Apple, every: 10s}]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Features.AutoUse.Items[0].Every.Std(); got != 24*time.Hour {
+		t.Errorf("every: 1d = %s", got)
 	}
 }

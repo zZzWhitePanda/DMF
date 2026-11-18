@@ -3,14 +3,37 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
-// Duration is a time.Duration that supports YAML string parsing ("45m", "2500ms").
+// Duration is a time.Duration that supports YAML string parsing ("45m",
+// "2500ms"), plus days ("2d", "1d12h"), which Go's own parser lacks.
 type Duration time.Duration
+
+// daysRE matches a leading day count, as in "2d" or "1.5d12h".
+var daysRE = regexp.MustCompile(`^(\d+(?:\.\d+)?)d`)
+
+// ParseDuration is time.ParseDuration with days allowed in front.
+func ParseDuration(s string) (time.Duration, error) {
+	var days time.Duration
+	if m := daysRE.FindStringSubmatch(s); m != nil {
+		n, err := strconv.ParseFloat(m[1], 64)
+		if err != nil {
+			return 0, err
+		}
+		days = time.Duration(n * float64(24*time.Hour))
+		if s = s[len(m[0]):]; s == "" {
+			return days, nil
+		}
+	}
+	rest, err := time.ParseDuration(s)
+	return days + rest, err
+}
 
 // UnmarshalYAML parses either a duration string or raw nanoseconds.
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
@@ -19,7 +42,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		*d = 0 // blank is unset, like a missing key
 		return nil
 	} else if err == nil {
-		parsed, err := time.ParseDuration(s)
+		parsed, err := ParseDuration(s)
 		if err != nil {
 			return fmt.Errorf("invalid duration %q: %w", s, err)
 		}
@@ -149,7 +172,7 @@ type AutoUseItem struct {
 }
 
 // MinAutoUseEvery is the shortest gap allowed between uses of one item.
-const MinAutoUseEvery = time.Minute
+const MinAutoUseEvery = 10 * time.Second
 
 type AutoBuy struct {
 	FishingPole  bool `yaml:"fishing_pole"`

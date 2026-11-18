@@ -230,8 +230,10 @@ var (
 		"no item", "not an item", "isn't an item", "unknown item", "doesn't exist", "does not exist"}
 	useOutPhrases = []string{"don't own", "do not own", "dont own", "don't have any", "do not have any",
 		"dont have any", "don't have this", "don't have that", "you own 0"}
+	// "Hold tight" is what Dank Memer says when another command, such as a
+	// running /flow, has it busy.
 	useNotReadyPhrases = []string{"already", "still active", "cooldown", "slow down", "slow it down",
-		"wait ", "try again"}
+		"wait ", "try again", "hold tight", "busy"}
 	useOKPhrases = []string{"you equip", "you used", "you use your", "you use a", "you use an", "you ate",
 		"you drank", "you drink", "you eat", "wear off", "wears off", "activated", "you open"}
 )
